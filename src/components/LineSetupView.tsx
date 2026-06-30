@@ -35,6 +35,7 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
   const [activeLayout, setActiveLayout] = useState<"grid6" | "cols3" | "banner1">("grid6");
   const [selectedTile, setSelectedTile] = useState(0);
   const [copiedTileId, setCopiedTileId] = useState<number | null>(null);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
   
   const [tilesConfig, setTilesConfig] = useState({
     grid6: [
@@ -359,6 +360,52 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
                     placeholder="วาง Channel Secret ของ LINE OA ที่นี่..."
                     className="bg-slate-50 hover:bg-slate-100/50 focus:bg-white border border-slate-200/60 focus:border-emerald-500 rounded-xl px-4 py-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/10 transition-all shadow-inner"
                   />
+                </div>
+
+                {/* Webhook URL indicator (CRITICAL FOR LIVE OA TESTING) */}
+                <div className="flex flex-col gap-2 p-4 bg-emerald-50/40 rounded-xl border border-emerald-100/60">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-700 flex items-center gap-1.5 text-xs">
+                      <ExternalLink size={13} className="text-emerald-500" />
+                      <span>LINE Webhook URL (ลิงก์เว็บฮุคสำหรับตั้งค่า LINE Developers)</span>
+                    </span>
+                    <span className="bg-emerald-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wider">
+                      Required
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 leading-relaxed font-sans">
+                    คัดลอกลิงก์ Webhook นี้ไปกรอกในเว็บ <b>LINE Developers Console</b> &rarr; แท็บ <b>Messaging API</b> &rarr; หัวข้อ <b>Webhook settings</b> &rarr; กดเปิดใช้งาน <b>Use webhook</b> แล้วคลิกปุ่ม <b>Verify</b> เพื่อเชื่อมสัญญาณจริง!
+                  </p>
+                  <div className="flex gap-2 items-center mt-1">
+                    <input
+                      type="text"
+                      readOnly
+                      value={appUrl ? `${appUrl}/api/line/webhook` : "https://sshop-12054782952.asia-southeast1.run.app/api/line/webhook"}
+                      className="bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-[10px] font-mono text-slate-600 flex-1 focus:outline-none select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetUrl = appUrl ? `${appUrl}/api/line/webhook` : "https://sshop-12054782952.asia-southeast1.run.app/api/line/webhook";
+                        navigator.clipboard.writeText(targetUrl);
+                        setCopiedWebhook(true);
+                        setTimeout(() => setCopiedWebhook(false), 2000);
+                      }}
+                      className="px-3 py-2 bg-slate-800 text-white hover:bg-slate-900 rounded-lg font-sans font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-all border-0 flex-shrink-0"
+                    >
+                      {copiedWebhook ? (
+                        <>
+                          <Check size={11} className="text-emerald-400 stroke-[3px]" />
+                          <span>คัดลอกแล้ว</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={11} />
+                          <span>คัดลอกลิงก์</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Admin User ID */}
