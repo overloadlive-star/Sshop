@@ -1,0 +1,6 @@
+{
+  "name": "S Shop Online",
+  "description": "S Shop Online แพลตฟอร์มร้านค้าออนไลน์ที่เชื่อมต่อกับ LINE ช่วยให้ลูกค้าเลือกซื้อสินค้า จัดการคำสั่งซื้อ และส่งข้อความสรุปออเดอร์ไปยัง LINE OA ได้ทันที",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
