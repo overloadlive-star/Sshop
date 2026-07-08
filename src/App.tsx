@@ -66,10 +66,38 @@ export default function App() {
   const [successOrderId, setSuccessOrderId] = useState<string | null>(null);
   const [showSimPanelOnMobile, setShowSimPanelOnMobile] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [autoLoginBanner, setAutoLoginBanner] = useState<string | null>(null);
 
   // Load user session and pull data
   useEffect(() => {
-    fetchInitialData();
+    const params = new URLSearchParams(window.location.search);
+    const lineUserId = params.get("lineUserId");
+    
+    if (lineUserId) {
+      setLoadingData(true);
+      fetch(`/api/auth/line-autologin?lineUserId=${encodeURIComponent(lineUserId)}`)
+        .then((res) => {
+          if (!res.ok) throw new Error("Auto-login failed");
+          return res.json();
+        })
+        .then((data) => {
+          if (data.user) {
+            handleLoginSuccess(data.user);
+            setAutoLoginBanner(data.user.name);
+            // Clean up the URL to keep it pretty
+            const url = new URL(window.location.href);
+            url.searchParams.delete("lineUserId");
+            window.history.replaceState({}, document.title, url.pathname + url.search);
+          }
+          fetchInitialData();
+        })
+        .catch((err) => {
+          console.error("LINE Auto-login failed:", err);
+          fetchInitialData();
+        });
+    } else {
+      fetchInitialData();
+    }
   }, []);
 
   // Sync data when user state changes (admin load all orders vs customer load customer's orders)
@@ -80,6 +108,51 @@ export default function App() {
       setOrders([]);
     }
   }, [currentUser]);
+
+  const handleLiffLogin = async (profile: { userId: string; displayName: string; pictureUrl?: string }) => {
+    try {
+      const response = await fetch("/api/auth/line-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: profile.userId,
+          displayName: profile.displayName,
+          pictureUrl: profile.pictureUrl,
+        }),
+      });
+      const data = await response.json();
+      if (response.ok && data.user) {
+        handleLoginSuccess(data.user);
+      }
+    } catch (err) {
+      console.error("[LIFF] Error logging in via backend API:", err);
+    }
+  };
+
+  // Initialize LIFF if a real LINE Login LIFF ID is configured
+  useEffect(() => {
+    if (shopConfig && shopConfig.lineLiffId) {
+      const liff = (window as any).liff;
+      if (liff) {
+        console.log("[LIFF] Initializing LIFF with ID:", shopConfig.lineLiffId);
+        liff.init({ liffId: shopConfig.lineLiffId })
+          .then(() => {
+            console.log("[LIFF] LIFF Initialized successfully!");
+            if (liff.isLoggedIn()) {
+              liff.getProfile().then((profile: any) => {
+                console.log("[LIFF] User is logged into LINE via LIFF:", profile.displayName);
+                handleLiffLogin(profile);
+              }).catch((err: any) => {
+                console.error("[LIFF] Error getting LIFF profile:", err);
+              });
+            }
+          })
+          .catch((err: any) => {
+            console.error("[LIFF] LIFF initialization failed:", err);
+          });
+      }
+    }
+  }, [shopConfig]);
 
   const fetchInitialData = async () => {
     setLoadingData(true);
@@ -278,7 +351,8 @@ export default function App() {
             onOrderSuccess={(orderId) => {
               fetchOrders();
               fetchLineLogs();
-              setSuccessOrderId(orderId);
+              setSuccessOrderId(null);
+              setCurrentTab("orders");
             }}
           />
         );
@@ -291,7 +365,7 @@ export default function App() {
             currentUser={currentUser}
           />
         );
-      case "admin-dashboard":
+       case "admin-dashboard":
         if (currentUser?.role !== "admin") {
           return <ShopView products={products} onAddToCart={handleAddToCart} cart={cart} shopConfig={shopConfig} />;
         }
@@ -301,6 +375,7 @@ export default function App() {
             orders={orders}
             onRefreshData={fetchInitialData}
             currentUser={currentUser}
+            onNavigateTab={setCurrentTab}
           />
         );
       case "shop-settings":
@@ -319,7 +394,7 @@ export default function App() {
         }
         return <LineSetupView currentUser={currentUser} />;
       case "auth":
-        return <AuthView onLoginSuccess={handleLoginSuccess} currentUser={currentUser} />;
+        return <AuthView onLoginSuccess={handleLoginSuccess} currentUser={currentUser} shopConfig={shopConfig} />;
       default:
         return <ShopView products={products} onAddToCart={handleAddToCart} cart={cart} shopConfig={shopConfig} />;
     }
@@ -408,7 +483,7 @@ export default function App() {
                 {currentTab === "admin-dashboard" && t("header_admin")}
                 {currentTab === "shop-settings" && t("header_settings")}
                 {currentTab === "line-setup" && t("header_line")}
-                {currentTab === "auth" && t("header_auth")}
+                {currentTab === "auth" && (currentUser ? t("header_profile") : t("header_auth"))}
               </h2>
             </div>
 
@@ -445,20 +520,71 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Mobile LINE simulator toggle trigger button */}
-              <button
-                onClick={() => setShowSimPanelOnMobile(!showSimPanelOnMobile)}
-                className="lg:hidden flex items-center gap-1 bg-brand-green hover:brightness-110 text-white px-2.5 py-1.5 md:px-3 md:py-2 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm"
-              >
-                <Smartphone size={12} />
-                <span className="hidden sm:inline">{showSimPanelOnMobile ? t("btn_hide_line") : t("btn_show_line")}</span>
-                <span className="inline sm:hidden">{lang === "th" ? "จำลอง LINE" : "LINE Sim"}</span>
-              </button>
+              {/* Mobile LINE simulator toggle trigger button (Admin only) */}
+              {currentUser?.role === "admin" && (
+                <button
+                  onClick={() => setShowSimPanelOnMobile(!showSimPanelOnMobile)}
+                  className="lg:hidden flex items-center gap-1 bg-brand-green hover:brightness-110 text-white px-2.5 py-1.5 md:px-3 md:py-2 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm"
+                >
+                  <Smartphone size={12} />
+                  <span className="hidden sm:inline">{showSimPanelOnMobile ? t("btn_hide_line") : t("btn_show_line")}</span>
+                  <span className="inline sm:hidden">{lang === "th" ? "จำลอง LINE" : "LINE Sim"}</span>
+                </button>
+              )}
             </div>
           </header>
 
           {/* Scrollable Work-View Workspace */}
           <div className={`flex-1 overflow-y-auto px-4 md:px-10 py-6 md:py-8 ${themeClasses.workspace}`}>
+            {currentUser && currentUser.role !== "admin" && orders.some(o => o.customerId === currentUser.id && o.paymentStatus === "pending") && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                onClick={() => setCurrentTab("orders")}
+                className="mb-6 bg-red-50 border border-red-200 text-red-800 px-4.5 py-3.5 rounded-xl flex items-center justify-between gap-3 text-xs shadow-md hover:scale-[1.01] hover:border-red-350 hover:bg-red-50/80 transition-all cursor-pointer font-sans"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="flex h-2.5 w-2.5 relative">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-600"></span>
+                  </span>
+                  <p className="font-bold leading-relaxed">
+                    {lang === "th" 
+                      ? "🔔 คุณมีออเดอร์ใหม่รอระบุที่อยู่จัดส่งและชำระเงิน! กรุณาคลิกที่นี่เพื่อไปหน้าจัดการใบเสร็จ" 
+                      : "🔔 You have a pending order waiting for shipping details and payment! Click here to manage."}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="bg-red-600 text-white font-extrabold text-[9px] px-2.5 py-1 rounded-full uppercase tracking-wider animate-bounce shadow-sm">
+                    {lang === "th" ? "กรอกที่อยู่และจ่ายเงิน" : "Pay & Fill Info"}
+                  </span>
+                </div>
+              </motion.div>
+            )}
+
+            {autoLoginBanner && (
+              <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3.5 rounded-xl mb-6 flex items-center justify-between text-xs font-semibold shadow-sm"
+              >
+                <div className="flex items-center gap-2">
+                  <CheckCircle size={16} className="text-emerald-500 flex-shrink-0" />
+                  <span>
+                    {lang === "th" 
+                      ? `✨ เข้าสู่ระบบผ่าน LINE สำเร็จแล้ว! ยินดีต้อนรับคุณ ${autoLoginBanner}` 
+                      : `✨ Successfully logged in via LINE! Welcome, ${autoLoginBanner}`}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setAutoLoginBanner(null)}
+                  className="text-emerald-500 hover:text-emerald-700 font-bold ml-2 text-[10px] uppercase tracking-wider"
+                >
+                  {lang === "th" ? "ปิด" : "Close"}
+                </button>
+              </motion.div>
+            )}
             {loadingData ? (
               <div className="flex flex-col items-center justify-center h-full text-slate-400">
                 <RefreshCw className="animate-spin text-slate-400 mb-2" size={24} />
@@ -470,16 +596,18 @@ export default function App() {
           </div>
         </main>
 
-        {/* 3. RIGHT HAND SIDE: LIVE HIGH-FIDELITY LINE NOTIFICATIONS SIMULATOR (DESKTOP COMPANION) */}
-        <div className="hidden lg:block w-[360px] p-6 bg-white border-l border-slate-200 h-full flex-shrink-0 overflow-y-auto">
-          <div className="sticky top-0">
-            <LineSimulator logs={lineLogs} onRefresh={fetchLineLogs} />
+        {/* 3. RIGHT HAND SIDE: LIVE HIGH-FIDELITY LINE NOTIFICATIONS SIMULATOR (DESKTOP COMPANION - Admin only) */}
+        {currentUser?.role === "admin" && (
+          <div className="hidden lg:block w-[360px] p-6 bg-white border-l border-slate-200 h-full flex-shrink-0 overflow-y-auto">
+            <div className="sticky top-0">
+              <LineSimulator logs={lineLogs} onRefresh={fetchLineLogs} />
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* MOBILE FLOATING DRAWER FOR SIMULATOR */}
+        {/* MOBILE FLOATING DRAWER FOR SIMULATOR (Admin only) */}
         <AnimatePresence>
-          {showSimPanelOnMobile && (
+          {showSimPanelOnMobile && currentUser?.role === "admin" && (
             <div className="fixed inset-0 z-40 bg-slate-950/40 backdrop-blur-[1px] lg:hidden flex justify-end">
               <motion.div
                 initial={{ x: "100%" }}

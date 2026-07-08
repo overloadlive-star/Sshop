@@ -51,6 +51,7 @@ export interface LineConfig {
   lineNotifyToken: string;
   lineChannelAccessToken: string;
   lineChannelSecret: string;
+  lineLiffId?: string;
   enabled: boolean;
   storeName: string;
   notificationMethod?: "notify" | "oa";
