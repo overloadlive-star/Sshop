@@ -7,9 +7,30 @@ import { dbInstance, User, Product, Order, OrderItem, LineConfig, Coupon } from 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+// Helper to construct dynamic shop base URL including subpath
+function getShopUrl(req: express.Request) {
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "sshop-12054782952.asia-southeast1.run.app";
+  const protocol = (req.headers["x-forwarded-proto"] as string) || "https";
+  return `${protocol}://${host}/app`;
+}
+
 // Increase limit to handle base64 image uploads (payment slips / product photos)
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// --- SUBPATH /app AND API ROUTE TRANSFORMATION MIDDLEWARE ---
+// This handles rewriting any incoming request to `/app/api/...` into `/api/...` dynamically so that all existing Express API routes match perfectly.
+app.use((req, res, next) => {
+  if (req.url.startsWith("/app/api/")) {
+    req.url = req.url.substring(4); // e.g. "/app/api/products" -> "/api/products"
+  }
+  next();
+});
+
+// Redirect root /app to /app/ to avoid relative path issues, but serve root '/' directly
+app.get("/app", (req, res, next) => {
+  res.redirect("/app/");
+});
 
 // In-memory LINE Notification Log Queue for the high-fidelity LINE simulator UI
 interface LineLog {
@@ -397,7 +418,7 @@ function buildFlexMessagePayload(type: "new_order" | "tracking" | "cancelled", o
           action: {
             type: "uri",
             label: "🛍️ ดูหน้าออเดอร์",
-            uri: "https://sshop-premium.com/orders"
+            uri: extra.shopUrl ? `${extra.shopUrl}/?view=orders` : "https://sshop-premium.com/orders"
           }
         }
       ]
@@ -497,6 +518,83 @@ app.post("/api/auth/line-login-simulate", (req, res) => {
   res.json({ message: "LINE Login successful", user });
 });
 
+// Real LINE Login / LIFF authentication endpoint
+app.post("/api/auth/line-login", (req, res) => {
+  const { userId, displayName, pictureUrl } = req.body;
+  if (!userId || !displayName) {
+    return res.status(400).json({ error: "Missing LINE profile details" });
+  }
+
+  // Find user by LINE ID, or create a new user profile linked to LINE
+  const users = dbInstance.getUsers();
+  let user = users.find((u) => u.lineUserId === userId);
+
+  if (!user) {
+    // Generate unique mock email based on LINE User ID
+    const email = `line_${userId.substring(2, 12)}@sshop.com`;
+    user = dbInstance.createUser({
+      email,
+      passwordHash: "line-login-real-pass",
+      name: displayName,
+      role: "customer",
+      lineUserId: userId,
+      lineDisplayName: displayName,
+      linePictureUrl: pictureUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${displayName}`,
+    });
+  } else {
+    // Update existing LINE details
+    dbInstance.updateLineProfile(user.id, { lineUserId: userId, displayName, pictureUrl });
+    user = dbInstance.getUserById(user.id);
+  }
+
+  res.json({ message: "LINE Login successful", user });
+});
+
+// Auto-login via lineUserId query parameter from chat/follow link
+app.get("/api/auth/line-autologin", (req, res) => {
+  const { lineUserId } = req.query;
+  if (!lineUserId || typeof lineUserId !== "string") {
+    return res.status(400).json({ error: "Missing lineUserId query parameter" });
+  }
+
+  const users = dbInstance.getUsers();
+  const user = users.find((u) => u.lineUserId === lineUserId);
+
+  if (!user) {
+    return res.status(404).json({ error: "User profile not found with this LINE ID" });
+  }
+
+  res.json({ message: "Auto-login successful", user });
+});
+
+// Update user profile (e.g. name, email, lineUserId)
+app.post("/api/auth/profile", (req, res) => {
+  const userId = req.headers["x-user-id"] as string;
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { name, email, lineUserId, lineDisplayName, linePictureUrl } = req.body;
+  const user = dbInstance.getUserById(userId);
+  if (!user) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  const updatedUser = dbInstance.updateUserProfile(userId, {
+    name: name !== undefined ? name : user.name,
+    email: email !== undefined ? email : user.email,
+    lineUserId: lineUserId !== undefined ? lineUserId : user.lineUserId,
+    lineDisplayName: lineDisplayName !== undefined ? lineDisplayName : user.lineDisplayName,
+    linePictureUrl: linePictureUrl !== undefined ? linePictureUrl : user.linePictureUrl,
+  });
+
+  if (!updatedUser) {
+    return res.status(500).json({ error: "Failed to update profile" });
+  }
+
+  res.json({ message: "Profile updated successfully", user: updatedUser });
+});
+
 
 // --- PRODUCTS ---
 
@@ -587,44 +685,72 @@ app.get("/api/orders", (req, res) => {
 
 // Create order
 app.post("/api/orders", (req, res) => {
+  try {
+    const authUserId = req.headers["x-user-id"] as string;
+    const authUser = authUserId ? dbInstance.getUserById(authUserId) : null;
+
+    const { customerName, customerPhone, customerAddress, items, totalAmount, couponCode, discountAmount, customerId } = req.body;
+    if (!customerName || !customerPhone || !customerAddress || !items || !items.length) {
+      return res.status(400).json({ error: "Missing order information" });
+    }
+
+    const targetCustomerId = (authUser?.role === "admin" && customerId) 
+      ? customerId 
+      : (authUser ? authUser.id : "guest-user");
+
+    const newOrder = dbInstance.createOrder({
+      customerId: targetCustomerId,
+      customerName,
+      customerPhone,
+      customerAddress,
+      items,
+      totalAmount: Number(totalAmount),
+      couponCode: couponCode || undefined,
+      discountAmount: discountAmount ? Number(discountAmount) : undefined
+    });
+
+    // Automatically update stock levels
+    items.forEach((item: any) => {
+      const product = dbInstance.getProductById(item.productId);
+      if (product) {
+        const newStock = Math.max(0, product.stock - item.quantity);
+        dbInstance.updateProduct(item.productId, { stock: newStock });
+      }
+    });
+
+    // Increment Coupon usage count if applied
+    if (couponCode) {
+      const coupon = dbInstance.getCouponByCode(couponCode);
+      if (coupon) {
+        dbInstance.updateCoupon(coupon.id, { usageCount: (coupon.usageCount || 0) + 1 });
+      }
+    }
+
+    res.status(201).json({ order: newOrder });
+  } catch (error: any) {
+    console.error("Error creating order:", error);
+    res.status(500).json({ error: error?.message || "Internal server error" });
+  }
+});
+
+// Reset all orders (Admin only)
+app.post("/api/orders/reset", async (req, res) => {
   const authUserId = req.headers["x-user-id"] as string;
   const authUser = authUserId ? dbInstance.getUserById(authUserId) : null;
 
-  const { customerName, customerPhone, customerAddress, items, totalAmount, couponCode, discountAmount } = req.body;
-  if (!customerName || !customerPhone || !customerAddress || !items || !items.length) {
-    return res.status(400).json({ error: "Missing order information" });
+  if (!authUser || authUser.role !== "admin") {
+    return res.status(403).json({ error: "Forbidden: Admin access required" });
   }
 
-  const newOrder = dbInstance.createOrder({
-    customerId: authUser ? authUser.id : "guest-user",
-    customerName,
-    customerPhone,
-    customerAddress,
-    items,
-    totalAmount: Number(totalAmount),
-    couponCode: couponCode || undefined,
-    discountAmount: discountAmount ? Number(discountAmount) : undefined
-  });
-
-  // Automatically update stock levels
-  items.forEach((item: any) => {
-    const product = dbInstance.getProductById(item.productId);
-    if (product) {
-      const newStock = Math.max(0, product.stock - item.quantity);
-      dbInstance.updateProduct(item.productId, { stock: newStock });
-    }
-  });
-
-  // Increment Coupon usage count if applied
-  if (couponCode) {
-    const coupon = dbInstance.getCouponByCode(couponCode);
-    if (coupon) {
-      dbInstance.updateCoupon(coupon.id, { usageCount: (coupon.usageCount || 0) + 1 });
-    }
+  try {
+    await dbInstance.clearAllOrders();
+    res.json({ message: "Reset all orders successfully" });
+  } catch (error: any) {
+    console.error("Error resetting orders:", error);
+    res.status(500).json({ error: error?.message || "Internal server error" });
   }
-
-  res.status(201).json({ order: newOrder });
 });
+
 app.put("/api/orders/:id/status", async (req, res) => {
   const authUserId = req.headers["x-user-id"] as string;
   const authUser = authUserId ? dbInstance.getUserById(authUserId) : null;
@@ -682,7 +808,7 @@ app.put("/api/orders/:id/status", async (req, res) => {
       if (isOA) {
         if (config.lineChannelAccessToken && config.adminLineUserId) {
           if (shouldSendRich) {
-            const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason: reasonText });
+            const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason: reasonText, shopUrl: getShopUrl(req) });
             const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, config.adminLineUserId, flexPayload);
             apiSuccess = apiResult.success;
             apiDetail = apiResult.detail || "Sent Flex Cancel Message to Admin via LINE OA";
@@ -732,7 +858,7 @@ app.put("/api/orders/:id/status", async (req, res) => {
         statusColor: "#ef4444",
         cancelReason: reasonText,
         buttonText: "ดูประวัติคำสั่งซื้อ",
-        buttonUrl: "https://sshop-premium.com/orders",
+        buttonUrl: getShopUrl(req) + "/?view=orders",
         customerName: updatedOrder.customerName,
         customerPhone: updatedOrder.customerPhone,
         customerAddress: updatedOrder.customerAddress
@@ -747,7 +873,7 @@ app.put("/api/orders/:id/status", async (req, res) => {
 
     if (config.enabled && isOA && config.lineChannelAccessToken && hasBuyerLine && customer.lineUserId) {
       if (shouldSendRich) {
-        const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason: reasonText });
+        const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason: reasonText, shopUrl: getShopUrl(req) });
         const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, customer.lineUserId, flexPayload);
         buyerApiSuccess = apiResult.success;
         buyerApiDetail = apiResult.detail || "Delivered Flex cancel message directly to Customer LINE chat.";
@@ -789,6 +915,167 @@ app.put("/api/orders/:id/status", async (req, res) => {
   }
 
   res.json({ order: updatedOrder });
+});
+
+// Cancel Order (User/Admin)
+app.post("/api/orders/:id/cancel", async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body || {};
+  const authUserId = req.headers["x-user-id"] as string;
+
+  const order = dbInstance.getOrderById(id);
+  if (!order) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+
+  // Check permissions: Owner or Admin
+  const authUser = authUserId ? dbInstance.getUserById(authUserId) : null;
+  const isOwner = authUserId && order.customerId === authUserId;
+  const isAdmin = authUser && authUser.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ error: "Forbidden: You do not have permission to cancel this order" });
+  }
+
+  if (order.shippingStatus === "shipped" || order.shippingStatus === "delivered") {
+    return res.status(400).json({ error: "ไม่สามารถยกเลิกออเดอร์ที่ถูกจัดส่งแล้วหรือส่งสำเร็จแล้วได้" });
+  }
+
+  if (order.shippingStatus === "cancelled") {
+    return res.status(400).json({ error: "ออเดอร์นี้ถูกยกเลิกไปแล้ว" });
+  }
+
+  const cancelReason = reason?.trim() || (isAdmin ? "ยกเลิกโดยผู้ดูแลระบบ" : "ยกเลิกโดยผู้ซื้อ");
+
+  // Perform order update
+  const updatedOrder = dbInstance.updateOrder(id, {
+    shippingStatus: "cancelled",
+    cancelReason: cancelReason
+  });
+
+  if (!updatedOrder) {
+    return res.status(500).json({ error: "Failed to update order status" });
+  }
+
+  // Trigger LINE notifications
+  try {
+    const config = dbInstance.getLineConfig();
+    const template = config.templateCancel || `❌ *ออเดอร์ถูกยกเลิก!* [ออเดอร์ {orderId}]\n---------------------------------\n👤 ลูกค้า: คุณ {customerName}\n📞 เบอร์โทร: {customerPhone}\n💰 ยอดรวม: {totalAmount} บาท\n---------------------------------\n⚠️ สถานะจัดส่ง: ยกเลิกออเดอร์ (Cancelled)\n💬 หมายเหตุที่ยกเลิก: {cancelReason}`;
+
+    const shopMessage = replacePlaceholders(template, updatedOrder, config, { cancelReason });
+    const buyerMessage = replacePlaceholders(template, updatedOrder, config, { cancelReason });
+
+    let apiSuccess = false;
+    let apiDetail = "LINE integration disabled or missing keys";
+    const isOA = config.notificationMethod === "oa";
+    const shouldSendRich = !!config.useRichMessage;
+
+    if (config.enabled) {
+      if (isOA) {
+        if (config.lineChannelAccessToken && config.adminLineUserId) {
+          if (shouldSendRich) {
+            const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason, shopUrl: getShopUrl(req) });
+            const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, config.adminLineUserId, flexPayload);
+            apiSuccess = apiResult.success;
+            apiDetail = apiResult.detail || "Sent Flex Cancel Message to Admin via LINE OA";
+          } else {
+            const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, config.adminLineUserId, shopMessage);
+            apiSuccess = apiResult.success;
+            apiDetail = apiResult.detail || "Sent Text Cancel Message to Admin via LINE OA";
+          }
+        }
+      } else {
+        if (config.lineNotifyToken) {
+          const apiResult = await sendLineNotify(config.lineNotifyToken, shopMessage);
+          apiSuccess = apiResult.success;
+          apiDetail = apiResult.detail || "Success";
+        }
+      }
+    }
+
+    const hasRealKeys = isOA
+      ? (!!config.lineChannelAccessToken && !!config.adminLineUserId)
+      : !!config.lineNotifyToken;
+
+    const statusVal = (hasRealKeys && config.enabled) ? (apiSuccess ? "success" : "failed") : "success";
+
+    const shopLog: LineLog = {
+      id: "log-shop-" + Math.random().toString(36).substr(2, 9),
+      type: isOA ? "messaging" : "notify",
+      recipient: isOA 
+        ? (config.adminLineUserId ? `ผู้ดูแลร้านค้า (LINE OA API ถึง ID: ${config.adminLineUserId})` : "ผู้ดูแลร้านค้า (ระบบจำลอง)")
+        : (config.lineNotifyToken ? "กลุ่มร้านค้า (ผ่าน LINE Notify API จริง)" : "ฝั่งร้านค้า (ระบบจำลอง)"),
+      message: shopMessage,
+      timestamp: new Date().toISOString(),
+      status: statusVal,
+      detail: hasRealKeys ? apiDetail : "Simulated cancellation notification sent successfully.",
+      isRich: shouldSendRich,
+      richData: shouldSendRich ? {
+        title: "❌ ออเดอร์ถูกยกเลิก!",
+        orderId: updatedOrder.id,
+        amount: updatedOrder.totalAmount,
+        items: updatedOrder.items.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+        status: "ยกเลิกแล้ว (Cancelled)",
+        statusColor: "#ef4444",
+        cancelReason: cancelReason,
+        buttonText: "ดูประวัติคำสั่งซื้อ",
+        buttonUrl: getShopUrl(req) + "/?view=orders",
+        customerName: updatedOrder.customerName,
+        customerPhone: updatedOrder.customerPhone,
+        customerAddress: updatedOrder.customerAddress
+      } : undefined
+    };
+
+    let buyerApiSuccess = false;
+    let buyerApiDetail = "";
+    const customer = dbInstance.getUserById(updatedOrder.customerId);
+    const hasBuyerLine = customer && customer.lineUserId;
+
+    if (config.enabled && isOA && config.lineChannelAccessToken && hasBuyerLine && customer.lineUserId) {
+      if (shouldSendRich) {
+        const flexPayload = buildFlexMessagePayload("cancelled", updatedOrder, config, { cancelReason, shopUrl: getShopUrl(req) });
+        const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, customer.lineUserId, flexPayload);
+        buyerApiSuccess = apiResult.success;
+        buyerApiDetail = apiResult.detail || "Delivered Flex cancel message directly to Customer LINE chat.";
+      } else {
+        const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, customer.lineUserId, buyerMessage);
+        buyerApiSuccess = apiResult.success;
+        buyerApiDetail = apiResult.detail || "Delivered Text cancel message directly to Customer LINE chat.";
+      }
+    }
+
+    const buyerHasRealKeys = isOA && !!config.lineChannelAccessToken && !!hasBuyerLine;
+
+    const buyerLog: LineLog = {
+      id: "log-buyer-" + Math.random().toString(36).substr(2, 9),
+      type: "messaging",
+      recipient: `คุณ ${updatedOrder.customerName} (ฝั่งผู้ซื้อ)`,
+      message: buyerMessage,
+      timestamp: new Date().toISOString(),
+      status: buyerHasRealKeys ? (buyerApiSuccess ? "success" : "failed") : "success",
+      detail: buyerHasRealKeys ? buyerApiDetail : "Simulated cancellation message delivered directly to Customer LINE chat.",
+      isRich: shouldSendRich,
+      richData: shouldSendRich ? {
+        title: "❌ ออเดอร์ของคุณถูกยกเลิก",
+        orderId: updatedOrder.id,
+        amount: updatedOrder.totalAmount,
+        items: updatedOrder.items.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+        status: "ยกเลิกแล้ว (Cancelled)",
+        statusColor: "#ef4444",
+        cancelReason: cancelReason,
+        customerName: updatedOrder.customerName,
+        customerPhone: updatedOrder.customerPhone,
+        customerAddress: updatedOrder.customerAddress
+      } : undefined
+    };
+
+    lineLogs.unshift(shopLog);
+    lineLogs.unshift(buyerLog);
+  } catch (notificationErr) {
+    console.error("Failed to send cancellation notifications:", notificationErr);
+  }
+
+  res.json({ success: true, order: updatedOrder });
 });
 
 // Send Shipping / Tracking Notification to LINE OA / Group
@@ -837,7 +1124,7 @@ app.post("/api/orders/:id/send-line-tracking", async (req, res) => {
     if (isOA) {
       if (config.lineChannelAccessToken && targetCustomerLineUserId) {
         if (shouldSendRich) {
-          const flexPayload = buildFlexMessagePayload("tracking", order, config, { trackingNumber, trackingUrl });
+          const flexPayload = buildFlexMessagePayload("tracking", order, config, { trackingNumber, trackingUrl, shopUrl: getShopUrl(req) });
           const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, targetCustomerLineUserId, flexPayload);
           apiSuccess = apiResult.success;
           apiDetail = apiResult.detail || "Sent Flex Tracking Message to Customer via LINE OA";
@@ -912,37 +1199,48 @@ app.post("/api/orders/:id/send-line-tracking", async (req, res) => {
 
 // Upload Payment Slip
 app.post("/api/orders/:id/upload-slip", (req, res) => {
-  const { id } = req.params;
-  const { slipBase64 } = req.body;
-  const authUserId = req.headers["x-user-id"] as string;
+  try {
+    const { id } = req.params;
+    const { slipBase64, customerName, customerPhone, customerAddress } = req.body;
+    const authUserId = req.headers["x-user-id"] as string;
 
-  if (!slipBase64) {
-    return res.status(400).json({ error: "Missing image data" });
+    if (!slipBase64) {
+      return res.status(400).json({ error: "Missing image data" });
+    }
+
+    const order = dbInstance.getOrderById(id);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // To simulate saving we create a local file metadata and link it
+    // We can just use the base64 or create a nice mock image URL path.
+    // We will store the base64 as the fileUrl for direct rendering in the frontend,
+    // which is extremely robust and avoids file-system paths.
+    const fileName = `slip_${id}_${Date.now()}.png`;
+    
+    dbInstance.addFile({
+      userId: authUserId || order.customerId,
+      fileName,
+      fileUrl: slipBase64
+    });
+
+    const updateFields: any = {
+      paymentSlipUrl: slipBase64,
+      paymentStatus: "verifying" // Update to 'verifying' (รอตรวจสอบการชำระเงิน) when slip is uploaded
+    };
+
+    if (customerName) updateFields.customerName = customerName;
+    if (customerPhone) updateFields.customerPhone = customerPhone;
+    if (customerAddress) updateFields.customerAddress = customerAddress;
+
+    const updatedOrder = dbInstance.updateOrder(id, updateFields);
+
+    res.json({ message: "Slip uploaded successfully", order: updatedOrder });
+  } catch (error: any) {
+    console.error("Error in upload-slip endpoint:", error);
+    res.status(500).json({ error: error?.message || "Internal server error" });
   }
-
-  const order = dbInstance.getOrderById(id);
-  if (!order) {
-    return res.status(404).json({ error: "Order not found" });
-  }
-
-  // To simulate saving we create a local file metadata and link it
-  // We can just use the base64 or create a nice mock image URL path.
-  // We will store the base64 as the fileUrl for direct rendering in the frontend,
-  // which is extremely robust and avoids file-system paths.
-  const fileName = `slip_${id}_${Date.now()}.png`;
-  
-  dbInstance.addFile({
-    userId: authUserId || order.customerId,
-    fileName,
-    fileUrl: slipBase64
-  });
-
-  const updatedOrder = dbInstance.updateOrder(id, {
-    paymentSlipUrl: slipBase64,
-    paymentStatus: "verifying" // Update to 'verifying' (รอตรวจสอบการชำระเงิน) when slip is uploaded
-  });
-
-  res.json({ message: "Slip uploaded successfully", order: updatedOrder });
 });
 
 
@@ -969,119 +1267,124 @@ app.post("/api/line/config", (req, res) => {
 
 // Send Order Summary to LINE OA / Group (Triggered when user clicks "Send Order" or is manually triggered)
 app.post("/api/orders/:id/send-line", async (req, res) => {
-  const { id } = req.params;
-  const order = dbInstance.getOrderById(id);
+  try {
+    const { id } = req.params;
+    const order = dbInstance.getOrderById(id);
 
-  if (!order) {
-    return res.status(404).json({ error: "Order not found" });
-  }
-
-  const config = dbInstance.getLineConfig();
-
-  // Retrieve custom template or fallback
-  const template = config.templateNewOrder || `🛍️ *ออเดอร์ใหม่เข้ามาแล้ว!* [{orderId}]\n---------------------------------\n👤 ลูกค้า: {customerName}\n📞 เบอร์โทร: {customerPhone}\n📍 ที่อยู่จัดส่ง: {customerAddress}\n---------------------------------\n📦 รายการสินค้า:\n{itemsText}\n---------------------------------\n💰 ยอดรวมทั้งหมด: {totalAmount} บาท\n💳 สถานะชำระเงิน: {paymentStatus}\n🚚 สถานะจัดส่ง: {shippingStatus}`;
-
-  // Process text notification with variable substitutions
-  const formattedMessage = replacePlaceholders(template, order, config);
-
-  let apiSuccess = false;
-  let apiDetail = "LINE integration disabled or missing keys";
-  const isOA = config.notificationMethod === "oa";
-  const shouldSendRich = !!config.useRichMessage;
-
-  // Let's decide who the target customer/admin is
-  let targetLineUserId = config.adminLineUserId || "";
-  if (!targetLineUserId) {
-    const customer = dbInstance.getUserById(order.customerId);
-    if (customer && customer.lineUserId) {
-      targetLineUserId = customer.lineUserId;
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
     }
-  }
 
-  if (config.enabled) {
-    if (isOA) {
-      if (config.lineChannelAccessToken) {
-        if (targetLineUserId) {
-          // If Rich Message is enabled, compile Flex Message. Otherwise send plain text.
-          if (shouldSendRich) {
-            const flexPayload = buildFlexMessagePayload("new_order", order, config);
-            const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, targetLineUserId, flexPayload);
-            apiSuccess = apiResult.success;
-            apiDetail = apiResult.detail || "Sent Flex Message to Recipient via LINE OA";
+    const config = dbInstance.getLineConfig();
+
+    // Retrieve custom template or fallback
+    const template = config.templateNewOrder || `🛍️ *ออเดอร์ใหม่เข้ามาแล้ว!* [{orderId}]\n---------------------------------\n👤 ลูกค้า: {customerName}\n📞 เบอร์โทร: {customerPhone}\n📍 ที่อยู่จัดส่ง: {customerAddress}\n---------------------------------\n📦 รายการสินค้า:\n{itemsText}\n---------------------------------\n💰 ยอดรวมทั้งหมด: {totalAmount} บาท\n💳 สถานะชำระเงิน: {paymentStatus}\n🚚 สถานะจัดส่ง: {shippingStatus}`;
+
+    // Process text notification with variable substitutions
+    const formattedMessage = replacePlaceholders(template, order, config);
+
+    let apiSuccess = false;
+    let apiDetail = "LINE integration disabled or missing keys";
+    const isOA = config.notificationMethod === "oa";
+    const shouldSendRich = !!config.useRichMessage;
+
+    // Let's decide who the target customer/admin is
+    let targetLineUserId = config.adminLineUserId || "";
+    if (!targetLineUserId) {
+      const customer = dbInstance.getUserById(order.customerId);
+      if (customer && customer.lineUserId) {
+        targetLineUserId = customer.lineUserId;
+      }
+    }
+
+    if (config.enabled) {
+      if (isOA) {
+        if (config.lineChannelAccessToken) {
+          if (targetLineUserId) {
+            // If Rich Message is enabled, compile Flex Message. Otherwise send plain text.
+            if (shouldSendRich) {
+              const flexPayload = buildFlexMessagePayload("new_order", order, config, { shopUrl: getShopUrl(req) });
+              const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, targetLineUserId, flexPayload);
+              apiSuccess = apiResult.success;
+              apiDetail = apiResult.detail || "Sent Flex Message to Recipient via LINE OA";
+            } else {
+              const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, targetLineUserId, formattedMessage);
+              apiSuccess = apiResult.success;
+              apiDetail = apiResult.detail || "Sent Text Message to Recipient via LINE OA";
+            }
           } else {
-            const apiResult = await sendLineOAMessage(config.lineChannelAccessToken, targetLineUserId, formattedMessage);
-            apiSuccess = apiResult.success;
-            apiDetail = apiResult.detail || "Sent Text Message to Recipient via LINE OA";
+            apiSuccess = false;
+            apiDetail = "No LINE User ID configured (Admin or Customer)";
           }
         } else {
           apiSuccess = false;
-          apiDetail = "No LINE User ID configured (Admin or Customer)";
+          apiDetail = "Missing LINE Channel Access Token";
         }
       } else {
-        apiSuccess = false;
-        apiDetail = "Missing LINE Channel Access Token";
-      }
-    } else {
-      if (config.lineNotifyToken) {
-        // LINE Notify only supports text (with optional image)
-        const apiResult = await sendLineNotify(config.lineNotifyToken, formattedMessage);
-        apiSuccess = apiResult.success;
-        apiDetail = apiResult.detail || "Sent via LINE Notify";
+        if (config.lineNotifyToken) {
+          // LINE Notify only supports text (with optional image)
+          const apiResult = await sendLineNotify(config.lineNotifyToken, formattedMessage);
+          apiSuccess = apiResult.success;
+          apiDetail = apiResult.detail || "Sent via LINE Notify";
+        }
       }
     }
+
+    const hasRealKeys = isOA
+      ? (!!config.lineChannelAccessToken && !!targetLineUserId)
+      : !!config.lineNotifyToken;
+
+    const recipientLabel = isOA
+      ? (config.adminLineUserId ? `ผู้ดูแลระบบ (LINE OA ถึง ID: ${config.adminLineUserId})` : "ผู้ซื้อสินค้า (LINE OA API)")
+      : (config.lineNotifyToken ? "กลุ่มร้านค้า (ผ่าน LINE Notify API จริง)" : "LINE OA S Shop (ระบบจำลอง)");
+
+    const detailVal = hasRealKeys 
+      ? apiDetail 
+      : (isOA 
+          ? "จำลองการส่งข้อมูลเรียบร้อย (กรุณากรอกคีย์ LINE OA และ User ID จริงด้านบนเพื่อส่งจริง)"
+          : "จำลองการส่งข้อมูลเรียบร้อย (กรุณากรอก LINE Notify Token ด้านบนเพื่อส่งจริง)");
+
+    // Create simulator log
+    const newLog: LineLog = {
+      id: "log-" + Math.random().toString(36).substr(2, 9),
+      type: isOA ? "messaging" : "notify",
+      recipient: recipientLabel,
+      message: formattedMessage,
+      timestamp: new Date().toISOString(),
+      status: (hasRealKeys && config.enabled) ? (apiSuccess ? "success" : "failed") : "success",
+      detail: detailVal,
+      isRich: shouldSendRich,
+      richData: shouldSendRich ? {
+        title: "🛍️ ออเดอร์ใหม่เข้ามาแล้ว!",
+        orderId: order.id,
+        amount: order.totalAmount,
+        items: order.items.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+        status: order.paymentStatus === "paid" ? "ชำระเงินเรียบร้อย" : order.paymentStatus === "verifying" ? "รอตรวจสอบยอดเงิน" : "รอชำระเงิน",
+        statusColor: "#10b981",
+        buttonText: "ดูออเดอร์ในเว็ปไซต์",
+        buttonUrl: getShopUrl(req) + "/?view=orders",
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        customerAddress: order.customerAddress
+      } : undefined
+    };
+
+    lineLogs.unshift(newLog); // Prepend to show latest logs first
+
+    // Update order's lineNotificationStatus
+    dbInstance.updateOrder(id, {
+      lineNotificationStatus: newLog.status === "success" ? "sent" : "failed"
+    });
+
+    res.json({
+      message: "Line notification triggered successfully",
+      log: newLog,
+      order: dbInstance.getOrderById(id),
+    });
+  } catch (error: any) {
+    console.error("Error in send-line endpoint:", error);
+    res.status(500).json({ error: error?.message || "Internal server error" });
   }
-
-  const hasRealKeys = isOA
-    ? (!!config.lineChannelAccessToken && !!targetLineUserId)
-    : !!config.lineNotifyToken;
-
-  const recipientLabel = isOA
-    ? (config.adminLineUserId ? `ผู้ดูแลระบบ (LINE OA ถึง ID: ${config.adminLineUserId})` : "ผู้ซื้อสินค้า (LINE OA API)")
-    : (config.lineNotifyToken ? "กลุ่มร้านค้า (ผ่าน LINE Notify API จริง)" : "LINE OA S Shop (ระบบจำลอง)");
-
-  const detailVal = hasRealKeys 
-    ? apiDetail 
-    : (isOA 
-        ? "จำลองการส่งข้อมูลเรียบร้อย (กรุณากรอกคีย์ LINE OA และ User ID จริงด้านบนเพื่อส่งจริง)"
-        : "จำลองการส่งข้อมูลเรียบร้อย (กรุณากรอก LINE Notify Token ด้านบนเพื่อส่งจริง)");
-
-  // Create simulator log
-  const newLog: LineLog = {
-    id: "log-" + Math.random().toString(36).substr(2, 9),
-    type: isOA ? "messaging" : "notify",
-    recipient: recipientLabel,
-    message: formattedMessage,
-    timestamp: new Date().toISOString(),
-    status: (hasRealKeys && config.enabled) ? (apiSuccess ? "success" : "failed") : "success",
-    detail: detailVal,
-    isRich: shouldSendRich,
-    richData: shouldSendRich ? {
-      title: "🛍️ ออเดอร์ใหม่เข้ามาแล้ว!",
-      orderId: order.id,
-      amount: order.totalAmount,
-      items: order.items.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price })),
-      status: order.paymentStatus === "paid" ? "ชำระเงินเรียบร้อย" : order.paymentStatus === "verifying" ? "รอตรวจสอบยอดเงิน" : "รอชำระเงิน",
-      statusColor: "#10b981",
-      buttonText: "ดูออเดอร์ในเว็ปไซต์",
-      buttonUrl: "https://sshop-premium.com/orders",
-      customerName: order.customerName,
-      customerPhone: order.customerPhone,
-      customerAddress: order.customerAddress
-    } : undefined
-  };
-
-  lineLogs.unshift(newLog); // Prepend to show latest logs first
-
-  // Update order's lineNotificationStatus
-  dbInstance.updateOrder(id, {
-    lineNotificationStatus: newLog.status === "success" ? "sent" : "failed"
-  });
-
-  res.json({
-    message: "Line notification triggered successfully",
-    log: newLog,
-    order: dbInstance.getOrderById(id),
-  });
 });
 
 // Send custom test LINE notification (Notify or OA)
@@ -1210,11 +1513,61 @@ app.post("/api/line/webhook", async (req, res) => {
 
     if (!lineUserId) continue;
 
+    // Fetch user details from LINE Profile API dynamically (if Channel Access Token exists)
+    let displayName = "ลูกค้า LINE";
+    let pictureUrl = "";
+    if (config.enabled && config.lineChannelAccessToken) {
+      try {
+        const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${lineUserId}`, {
+          headers: {
+            Authorization: `Bearer ${config.lineChannelAccessToken}`
+          }
+        });
+        if (profileRes.ok) {
+          const profile = await profileRes.json();
+          displayName = profile.displayName || displayName;
+          pictureUrl = profile.pictureUrl || pictureUrl;
+        }
+      } catch (err) {
+        console.error("Error fetching LINE profile from LINE API:", err);
+      }
+    }
+
+    // Automatically create / update customer profile in database
+    const users = dbInstance.getUsers();
+    let dbUser = users.find((u) => u.lineUserId === lineUserId);
+    if (!dbUser) {
+      const email = `line_${lineUserId.substring(0, 8)}@sshop.com`;
+      dbUser = dbInstance.createUser({
+        email,
+        passwordHash: "line-login-pass",
+        name: displayName,
+        role: "customer",
+        lineUserId: lineUserId,
+        lineDisplayName: displayName,
+        linePictureUrl: pictureUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(displayName)}`,
+      });
+      console.log(`Automatically registered member: ${displayName} (LINE User ID: ${lineUserId})`);
+    } else {
+      // Keep profile info updated if it changed
+      dbInstance.updateLineProfile(dbUser.id, {
+        lineUserId,
+        displayName,
+        pictureUrl: pictureUrl || dbUser.linePictureUrl
+      });
+    }
+
+    // Determine the shop's domain dynamically to generate direct login link
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "sshop-12054782952.asia-southeast1.run.app";
+    const protocol = (req.headers["x-forwarded-proto"] as string) || "https";
+    const shopUrl = `${protocol}://${host}`;
+    const autoLoginUrl = `${shopUrl}/app/?lineUserId=${lineUserId}`;
+
     // Handle incoming text messages
     if (eventType === "message" && event.message?.type === "text") {
       const text = event.message.text;
       
-      const replyMessage = `สวัสดีครับ! ยินดีต้อนรับสู่ร้าน S Shop Online (LINE OA) 🛍️✨\n\nนี่คือรหัสผู้ใช้ LINE (User ID) ของคุณสำหรับการเชื่อมต่อแจ้งเตือน:\n👉 ${lineUserId}\n\nคุณสามารถคัดลอกรหัสนี้ไปกรอกในหน้า "บัญชีผู้ใช้" ของคุณบนเว็บไซต์ของร้านค้า เพื่อเปิดรับข้อมูลข่าวสาร เลขพัสดุ และสถานะสินค้าแบบส่วนตัวได้ทันทีครับ! 📦\n\nหรือส่งข้อความอื่นเพื่อสอบถามข้อมูลกับทางแอดมินเพิ่มเติมได้ตลอดเวลาครับ 🙏`;
+      const replyMessage = `สวัสดีครับคุณ ${displayName}! ยินดีต้อนรับสู่ร้าน S Shop Online (LINE OA) 🛍️✨\n\n🎉 ระบบได้สมัครสมาชิกให้คุณและเชื่อมต่อบัญชีอัตโนมัติเรียบร้อยแล้วครับ!\n\nคุณสามารถเข้าสู่ระบบร้านค้าเพื่อเลือกซื้อสินค้า หรือติดตามสถานะออเดอร์/เลขพัสดุ ได้ทันทีโดยไม่ต้องใช้รหัสผ่าน เพียงกดลิงก์ด้านล่างนี้ได้เลยครับ:\n👇👇👇\n🔗 ${autoLoginUrl}\n\nหรือส่งข้อความอื่นเพื่อสอบถามข้อมูลกับทางแอดมินเพิ่มเติมได้ตลอดเวลาครับ 🙏`;
 
       let apiSuccess = false;
       let apiDetail = "LINE OA configuration is not active";
@@ -1222,7 +1575,7 @@ app.post("/api/line/webhook", async (req, res) => {
       if (config.enabled && config.lineChannelAccessToken) {
         const result = await replyLineOAMessage(config.lineChannelAccessToken, replyToken, replyMessage);
         apiSuccess = result.success;
-        apiDetail = result.detail || "Replied with User ID to user via LINE OA reply API";
+        apiDetail = result.detail || "Replied with Auto-login Link to user via LINE OA reply API";
       } else {
         apiDetail = "Missing Line Channel Access Token on server. Logged webhook text event.";
       }
@@ -1231,17 +1584,17 @@ app.post("/api/line/webhook", async (req, res) => {
       const newLog: LineLog = {
         id: "webhook-log-" + Math.random().toString(36).substr(2, 9),
         type: "messaging",
-        recipient: `Webhook จาก User: ${lineUserId}`,
+        recipient: `Webhook จาก User: ${displayName}`,
         message: `📥 ได้รับข้อความ: "${text}"`,
         timestamp: new Date().toISOString(),
         status: "success",
-        detail: `[ข้อมูลระบบ] ${apiDetail}. รหัสที่เข้ามาคือ: ${lineUserId}`,
+        detail: `[ข้อมูลระบบ] สมัครสมาชิกและส่งลิงก์ล็อกอินสำเร็จ (${apiDetail}). รหัส: ${lineUserId}`,
       };
       lineLogs.unshift(newLog);
     } 
     // Handle follow/add friend events
     else if (eventType === "follow") {
-      const replyMessage = `สวัสดีครับ! ขอบคุณที่เพิ่มเราเป็นเพื่อน ยินดีต้อนรับสู่ร้าน S Shop Online (LINE OA) 🛍️✨\n\nนี่คือรหัสผู้ใช้ LINE (User ID) ของคุณสำหรับการเชื่อมต่อแจ้งเตือน:\n👉 ${lineUserId}\n\nคุณสามารถคัดลอกรหัสนี้ไปกรอกในหน้า "บัญชีผู้ใช้" ของคุณบนเว็บไซต์ของร้านค้า เพื่อเปิดรับข้อมูลข่าวสาร เลขพัสดุ และสถานะสินค้าแบบส่วนตัวได้ทันทีครับ! 📦\n\nหรือส่งข้อความอื่นเพื่อสอบถามข้อมูลกับทางแอดมินเพิ่มเติมได้ตลอดเวลาครับ 🙏`;
+      const replyMessage = `สวัสดีครับคุณ ${displayName}! ขอบคุณที่เพิ่มเราเป็นเพื่อน ยินดีต้อนรับสู่ร้าน S Shop Online (LINE OA) 🛍️✨\n\n🎉 ระบบได้สมัครสมาชิกให้คุณและเชื่อมต่อบัญชีอัตโนมัติเรียบร้อยแล้วครับ!\n\nคุณสามารถเข้าสู่ระบบร้านค้าเพื่อเลือกซื้อสินค้า หรือติดตามสถานะออเดอร์/เลขพัสดุ ได้ทันทีโดยไม่ต้องใช้รหัสผ่าน เพียงกดลิงก์ด้านล่างนี้ได้เลยครับ:\n👇👇👇\n🔗 ${autoLoginUrl}\n\nช้อปปิ้งได้ง่ายๆ ในคลิกเดียวเลยครับ ยินดีให้บริการเสมอนะครับ! 📦✨`;
 
       let apiSuccess = false;
       let apiDetail = "LINE OA configuration is not active";
@@ -1249,17 +1602,17 @@ app.post("/api/line/webhook", async (req, res) => {
       if (config.enabled && config.lineChannelAccessToken) {
         const result = await replyLineOAMessage(config.lineChannelAccessToken, replyToken, replyMessage);
         apiSuccess = result.success;
-        apiDetail = result.detail || "Replied with welcome msg & User ID to new follower via reply API";
+        apiDetail = result.detail || "Replied with Auto-login Link to new follower via reply API";
       }
 
       const newLog: LineLog = {
         id: "webhook-follow-" + Math.random().toString(36).substr(2, 9),
         type: "messaging",
-        recipient: `Webhook LINE OA (ผู้ติดตามใหม่)`,
+        recipient: `Webhook LINE OA (${displayName})`,
         message: `👥 มีผู้ใช้งานกดเพิ่มเพื่อนใหม่ (Follow Event)`,
         timestamp: new Date().toISOString(),
         status: "success",
-        detail: `[ข้อมูลระบบ] ${apiDetail}. รหัสผู้ติดตามใหม่: ${lineUserId}`,
+        detail: `[ข้อมูลระบบ] สมัครสมาชิกใหม่และส่งลิงก์ล็อกอินสำเร็จ (${apiDetail}). รหัส: ${lineUserId}`,
       };
       lineLogs.unshift(newLog);
     }
@@ -1506,11 +1859,19 @@ async function startServer() {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
+      base: "/",
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // Support serving static files at both /app and /
+    app.use("/app", express.static(distPath));
     app.use(express.static(distPath));
+    
+    // Resolve frontend routes
+    app.get("/app*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });

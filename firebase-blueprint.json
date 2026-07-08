@@ -1,0 +1,123 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile data",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "passwordHash": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "lineUserId": { "type": "string" },
+        "lineDisplayName": { "type": "string" },
+        "linePictureUrl": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "email", "name", "role", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Product details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "price": { "type": "number" },
+        "description": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "category": { "type": "string" },
+        "stock": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "price", "description", "imageUrl", "category", "stock", "createdAt"]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Discount coupons",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "discountType": { "type": "string" },
+        "discountValue": { "type": "number" },
+        "minSpend": { "type": "number" },
+        "maxDiscount": { "type": "number" },
+        "usageLimit": { "type": "number" },
+        "usageCount": { "type": "number" },
+        "expiryDate": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "code", "discountType", "discountValue", "usageCount", "isActive", "createdAt"]
+    },
+    "LineConfig": {
+      "title": "LineConfig",
+      "description": "LINE and shop settings configuration",
+      "type": "object",
+      "properties": {
+        "lineNotifyToken": { "type": "string" },
+        "lineChannelAccessToken": { "type": "string" },
+        "lineChannelSecret": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "storeName": { "type": "string" }
+      }
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer order",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerAddress": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "paymentStatus": { "type": "string" },
+        "shippingStatus": { "type": "string" },
+        "lineNotificationStatus": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "FileMetadata": {
+      "title": "FileMetadata",
+      "description": "Uploaded file information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "uploadDate": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Users list"
+    },
+    "products/{productId}": {
+      "schema": "Product",
+      "description": "Shop products"
+    },
+    "coupons/{couponId}": {
+      "schema": "Coupon",
+      "description": "Discount coupons"
+    },
+    "settings/{settingId}": {
+      "schema": "LineConfig",
+      "description": "Global shop and line settings"
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer orders"
+    },
+    "files/{fileId}": {
+      "schema": "FileMetadata",
+      "description": "Uploaded slip or other files"
+    }
+  }
+}
