@@ -1,5 +1,74 @@
 import fs from "fs";
 import path from "path";
+import { initializeApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc as firebaseSetDoc, 
+  updateDoc, 
+  deleteDoc,
+  initializeFirestore
+} from "firebase/firestore";
+
+export function removeUndefined<T>(obj: T): T {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(removeUndefined) as unknown as T;
+  }
+  if (typeof obj === "object") {
+    const newObj: any = {};
+    for (const key of Object.keys(obj as any)) {
+      const val = (obj as any)[key];
+      if (val !== undefined) {
+        newObj[key] = removeUndefined(val);
+      }
+    }
+    return newObj;
+  }
+  return obj;
+}
+
+function setDoc(documentRef: any, data: any, options?: any) {
+  return firebaseSetDoc(documentRef, removeUndefined(data), options);
+}
+
+// Load firebase-applet-config.json or use FIREBASE_CONFIG env var
+let firebaseConfig: any = null;
+let db: any = null;
+
+try {
+  if (process.env.FIREBASE_CONFIG) {
+    try {
+      firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+      console.log("[Firestore] Firebase config loaded from FIREBASE_CONFIG environment variable.");
+    } catch (e) {
+      console.error("[Firestore] Failed to parse FIREBASE_CONFIG environment variable as JSON:", e);
+    }
+  }
+
+  if (!firebaseConfig) {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      console.log("[Firestore] Firebase config loaded from firebase-applet-config.json");
+    }
+  }
+
+  if (firebaseConfig && firebaseConfig.projectId) {
+    const firebaseApp = initializeApp(firebaseConfig);
+    db = firebaseConfig.firestoreDatabaseId 
+      ? initializeFirestore(firebaseApp, { ignoreUndefinedProperties: true }, firebaseConfig.firestoreDatabaseId)
+      : initializeFirestore(firebaseApp, { ignoreUndefinedProperties: true });
+    console.log("[Firestore] Firebase Firestore initialized successfully with project ID:", firebaseConfig.projectId);
+  } else {
+    console.warn("[Firestore] No Firebase configuration found. Server is operating in standalone offline mode with local JSON db.");
+  }
+} catch (err) {
+  console.error("Error initializing Firebase:", err);
+}
 
 // Define the file paths
 const DB_DIR = path.join(process.cwd(), "data");
@@ -191,8 +260,8 @@ const SEED_PRODUCTS: Product[] = [
 const DEFAULT_USERS: User[] = [
   {
     id: "user-admin",
-    email: "admin@sshop.com",
-    passwordHash: "admin1234", // Simple demo string checking
+    email: "adminthan",
+    passwordHash: "kakmak1911", // Simple demo string checking
     name: "S Shop Administrator",
     role: "admin",
     createdAt: new Date().toISOString(),
@@ -327,8 +396,140 @@ export class JSONDatabase {
           coupons: parsed.coupons || SEED_COUPONS,
         };
       }
+
+      // Sync with Firestore if initialized
+      if (db) {
+        this.syncWithFirestore();
+      }
     } catch (error) {
       console.error("Error initializing JSON Database:", error);
+    }
+  }
+
+  private async syncWithFirestore() {
+    console.log("[Firestore] Starting initial sync with Firestore database...");
+
+    // 1. Sync Users
+    try {
+      const usersSnap = await getDocs(collection(db, "users"));
+      if (usersSnap.empty) {
+        console.log("[Firestore] Users collection is empty. Seeding local users to Firestore...");
+        for (const u of this.data.users) {
+          await setDoc(doc(db, "users", u.id), u);
+        }
+      } else {
+        const users: User[] = [];
+        usersSnap.forEach((doc) => users.push(doc.data() as User));
+        this.data.users = users;
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'users' collection:", err instanceof Error ? err.message : err);
+    }
+
+    // 2. Sync Products
+    try {
+      const productsSnap = await getDocs(collection(db, "products"));
+      if (productsSnap.empty) {
+        console.log("[Firestore] Products collection is empty. Seeding local products to Firestore...");
+        for (const p of this.data.products) {
+          await setDoc(doc(db, "products", p.id), p);
+        }
+      } else {
+        const products: Product[] = [];
+        productsSnap.forEach((doc) => products.push(doc.data() as Product));
+        this.data.products = products;
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'products' collection:", err instanceof Error ? err.message : err);
+    }
+
+    // 3. Sync Coupons
+    try {
+      const couponsSnap = await getDocs(collection(db, "coupons"));
+      if (couponsSnap.empty) {
+        console.log("[Firestore] Coupons collection is empty. Seeding local coupons to Firestore...");
+        for (const c of this.data.coupons) {
+          await setDoc(doc(db, "coupons", c.id), c);
+        }
+      } else {
+        const coupons: Coupon[] = [];
+        couponsSnap.forEach((doc) => coupons.push(doc.data() as Coupon));
+        this.data.coupons = coupons;
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'coupons' collection:", err instanceof Error ? err.message : err);
+    }
+
+    // 4. Sync Settings (LineConfig)
+    try {
+      const settingsDoc = await getDoc(doc(db, "settings", "lineConfig"));
+      if (!settingsDoc.exists()) {
+        console.log("[Firestore] Settings lineConfig doc is missing. Seeding to Firestore...");
+        await setDoc(doc(db, "settings", "lineConfig"), this.data.lineConfig);
+      } else {
+        this.data.lineConfig = settingsDoc.data() as LineConfig;
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'settings' doc:", err instanceof Error ? err.message : err);
+    }
+
+    // 5. Sync Orders
+    try {
+      const ordersSnap = await getDocs(collection(db, "orders"));
+      if (!ordersSnap.empty) {
+        const firestoreOrders: Order[] = [];
+        ordersSnap.forEach((doc) => firestoreOrders.push(doc.data() as Order));
+        
+        // Merge with existing local orders to preserve full local base64 slip images
+        const mergedOrders = firestoreOrders.map(fo => {
+          const localOrder = this.data.orders.find(lo => lo.id === fo.id);
+          if (localOrder && localOrder.paymentSlipUrl && localOrder.paymentSlipUrl.startsWith("data:image")) {
+            if (!fo.paymentSlipUrl || !fo.paymentSlipUrl.startsWith("data:image") || fo.paymentSlipUrl.includes("truncated")) {
+              return { ...fo, paymentSlipUrl: localOrder.paymentSlipUrl };
+            }
+          }
+          return fo;
+        });
+
+        // Also add any local orders that are not in Firestore yet
+        const missingFromFirestore = this.data.orders.filter(lo => !firestoreOrders.some(fo => fo.id === lo.id));
+        this.data.orders = [...mergedOrders, ...missingFromFirestore];
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'orders' collection:", err instanceof Error ? err.message : err);
+    }
+
+    // 6. Sync Files
+    try {
+      const filesSnap = await getDocs(collection(db, "files"));
+      if (!filesSnap.empty) {
+        const firestoreFiles: FileMetadata[] = [];
+        filesSnap.forEach((doc) => firestoreFiles.push(doc.data() as FileMetadata));
+        
+        // Merge to preserve local full base64
+        const mergedFiles = firestoreFiles.map(ff => {
+          const localFile = this.data.files.find(lf => lf.id === ff.id);
+          if (localFile && localFile.fileUrl && localFile.fileUrl.startsWith("data:image")) {
+            if (!ff.fileUrl || !ff.fileUrl.startsWith("data:image") || ff.fileUrl.includes("truncated")) {
+              return { ...ff, fileUrl: localFile.fileUrl };
+            }
+          }
+          return ff;
+        });
+
+        const missingFromFirestore = this.data.files.filter(lf => !firestoreFiles.some(ff => ff.id === lf.id));
+        this.data.files = [...mergedFiles, ...missingFromFirestore];
+      }
+    } catch (err) {
+      console.warn("[Firestore] Unable to sync 'files' collection:", err instanceof Error ? err.message : err);
+    }
+
+    // Write initial synced data back to local DB file
+    try {
+      this.save();
+      console.log("[Firestore] Initial sync complete. Local copy updated!");
+    } catch (err) {
+      console.error("[Firestore] Error saving local database copy after sync:", err);
     }
   }
 
@@ -361,6 +562,13 @@ export class JSONDatabase {
     };
     this.data.users.push(newUser);
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "users", newUser.id), newUser).catch((e) =>
+        console.error("[Firestore] Error creating user document:", e)
+      );
+    }
+
     return newUser;
   }
 
@@ -374,7 +582,33 @@ export class JSONDatabase {
         linePictureUrl: lineProfile.pictureUrl || this.data.users[userIndex].linePictureUrl,
       };
       this.save();
+
+      if (db) {
+        setDoc(doc(db, "users", userId), this.data.users[userIndex]).catch((e) =>
+          console.error("[Firestore] Error updating user Line profile:", e)
+        );
+      }
     }
+  }
+
+  public updateUserProfile(userId: string, updatedFields: Partial<Omit<User, "id" | "role" | "passwordHash" | "createdAt">>) {
+    const userIndex = this.data.users.findIndex((u) => u.id === userId);
+    if (userIndex !== -1) {
+      this.data.users[userIndex] = {
+        ...this.data.users[userIndex],
+        ...updatedFields,
+      };
+      this.save();
+
+      if (db) {
+        setDoc(doc(db, "users", userId), this.data.users[userIndex]).catch((e) =>
+          console.error("[Firestore] Error updating user profile:", e)
+        );
+      }
+
+      return this.data.users[userIndex];
+    }
+    return undefined;
   }
 
   // --- PRODUCTS ---
@@ -394,6 +628,13 @@ export class JSONDatabase {
     };
     this.data.products.push(newProduct);
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "products", newProduct.id), newProduct).catch((e) =>
+        console.error("[Firestore] Error creating product:", e)
+      );
+    }
+
     return newProduct;
   }
 
@@ -405,6 +646,13 @@ export class JSONDatabase {
       ...updatedFields,
     };
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "products", id), this.data.products[index]).catch((e) =>
+        console.error("[Firestore] Error updating product:", e)
+      );
+    }
+
     return this.data.products[index];
   }
 
@@ -413,6 +661,13 @@ export class JSONDatabase {
     this.data.products = this.data.products.filter((p) => p.id !== id);
     if (this.data.products.length < initialLen) {
       this.save();
+
+      if (db) {
+        deleteDoc(doc(db, "products", id)).catch((e) =>
+          console.error("[Firestore] Error deleting product:", e)
+        );
+      }
+
       return true;
     }
     return false;
@@ -442,6 +697,21 @@ export class JSONDatabase {
     };
     this.data.orders.push(newOrder);
     this.save();
+
+    if (db) {
+      try {
+        const orderCopy = { ...newOrder };
+        if (orderCopy.paymentSlipUrl && orderCopy.paymentSlipUrl.startsWith("data:image")) {
+          orderCopy.paymentSlipUrl = orderCopy.paymentSlipUrl.substring(0, 500) + "...(base64 truncated for Firestore)";
+        }
+        setDoc(doc(db, "orders", newOrder.id), orderCopy).catch((e) =>
+          console.error("[Firestore] Error creating order document:", e)
+        );
+      } catch (err) {
+        console.error("[Firestore] Sync trigger failed in createOrder:", err);
+      }
+    }
+
     return newOrder;
   }
 
@@ -453,7 +723,48 @@ export class JSONDatabase {
       ...updatedFields,
     };
     this.save();
+
+    if (db) {
+      try {
+        const orderCopy = { ...this.data.orders[index] };
+        if (orderCopy.paymentSlipUrl && orderCopy.paymentSlipUrl.startsWith("data:image")) {
+          orderCopy.paymentSlipUrl = orderCopy.paymentSlipUrl.substring(0, 500) + "...(base64 truncated for Firestore)";
+        }
+        setDoc(doc(db, "orders", id), orderCopy).catch((e) =>
+          console.error("[Firestore] Error updating order document:", e)
+        );
+      } catch (err) {
+        console.error("[Firestore] Sync trigger failed in updateOrder:", err);
+      }
+    }
+
     return this.data.orders[index];
+  }
+
+  public async clearAllOrders(): Promise<void> {
+    this.data.orders = [];
+    this.data.files = [];
+    this.save();
+
+    if (db) {
+      try {
+        const ordersSnap = await getDocs(collection(db, "orders"));
+        ordersSnap.forEach((d) => {
+          deleteDoc(doc(db, "orders", d.id)).catch((e) =>
+            console.error("[Firestore] Error deleting order doc on reset:", e)
+          );
+        });
+        const filesSnap = await getDocs(collection(db, "files"));
+        filesSnap.forEach((d) => {
+          deleteDoc(doc(db, "files", d.id)).catch((e) =>
+            console.error("[Firestore] Error deleting file doc on reset:", e)
+          );
+        });
+        console.log("[Firestore] Successfully cleared remote orders and files from Firestore.");
+      } catch (err) {
+        console.error("[Firestore] Error clearing Firestore orders and files:", err);
+      }
+    }
   }
 
   // --- LINE CONFIG ---
@@ -467,6 +778,13 @@ export class JSONDatabase {
       ...config,
     };
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "settings", "lineConfig"), this.data.lineConfig).catch((e) =>
+        console.error("[Firestore] Error updating lineConfig settings:", e)
+      );
+    }
+
     return this.data.lineConfig;
   }
 
@@ -487,6 +805,21 @@ export class JSONDatabase {
     };
     this.data.files.push(newFile);
     this.save();
+
+    if (db) {
+      try {
+        const fileCopy = { ...newFile };
+        if (fileCopy.fileUrl && fileCopy.fileUrl.startsWith("data:image")) {
+          fileCopy.fileUrl = fileCopy.fileUrl.substring(0, 500) + "...(base64 truncated for Firestore)";
+        }
+        setDoc(doc(db, "files", newFile.id), fileCopy).catch((e) =>
+          console.error("[Firestore] Error adding file document:", e)
+        );
+      } catch (err) {
+        console.error("[Firestore] Sync trigger failed in addFile:", err);
+      }
+    }
+
     return newFile;
   }
 
@@ -514,6 +847,13 @@ export class JSONDatabase {
     if (!this.data.coupons) this.data.coupons = [];
     this.data.coupons.push(newCoupon);
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "coupons", newCoupon.id), newCoupon).catch((e) =>
+        console.error("[Firestore] Error creating coupon:", e)
+      );
+    }
+
     return newCoupon;
   }
 
@@ -526,6 +866,13 @@ export class JSONDatabase {
       ...updatedFields,
     };
     this.save();
+
+    if (db) {
+      setDoc(doc(db, "coupons", id), this.data.coupons[index]).catch((e) =>
+        console.error("[Firestore] Error updating coupon:", e)
+      );
+    }
+
     return this.data.coupons[index];
   }
 
@@ -535,6 +882,13 @@ export class JSONDatabase {
     this.data.coupons = this.data.coupons.filter((c) => c.id !== id);
     if (this.data.coupons.length < initialLen) {
       this.save();
+
+      if (db) {
+        deleteDoc(doc(db, "coupons", id)).catch((e) =>
+          console.error("[Firestore] Error deleting coupon:", e)
+        );
+      }
+
       return true;
     }
     return false;
