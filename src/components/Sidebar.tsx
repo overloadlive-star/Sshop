@@ -128,6 +128,10 @@ export default function Sidebar({ currentTab, setCurrentTab, currentUser, onLogo
     { id: "orders", label: t("sidebar_orders"), icon: History, badge: null },
   ];
 
+  if (currentUser) {
+    menuItems.push({ id: "auth", label: t("sidebar_profile"), icon: UserCheck, badge: null });
+  }
+
   const adminItems = [
     { id: "admin-dashboard", label: t("sidebar_management"), icon: Shield, badge: null },
     { id: "shop-settings", label: t("sidebar_shop_settings"), icon: Settings2, badge: null },
@@ -253,7 +257,14 @@ export default function Sidebar({ currentTab, setCurrentTab, currentUser, onLogo
         <div className={`p-4 mt-auto ${sidebarStyles.footer}`}>
           {currentUser ? (
             <div className="flex flex-col gap-2.5">
-              <div className="flex items-center gap-2">
+              <div
+                onClick={() => {
+                  setCurrentTab("auth");
+                  onClose();
+                }}
+                className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity p-1 rounded-lg hover:bg-slate-100/50"
+                title={lang === "th" ? "ดูโปรไฟล์ของฉัน" : "View my profile"}
+              >
                 <div className="w-8 h-8 rounded-full bg-slate-200 flex-shrink-0 border border-slate-300/45 overflow-hidden">
                   {currentUser.linePictureUrl ? (
                     <img src={currentUser.linePictureUrl} alt={currentUser.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />

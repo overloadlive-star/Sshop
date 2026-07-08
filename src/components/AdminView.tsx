@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Product, Order, CustomerSummary, Coupon } from "../types";
-import { Shield, Plus, Edit, Trash2, CheckCircle, Package, Users, FileText, DollarSign, RefreshCw, Eye, EyeOff, Save, X, ExternalLink, Sliders, BarChart2, Calendar, TrendingUp, Printer, Ticket } from "lucide-react";
+import { Shield, Plus, Edit, Trash2, CheckCircle, Package, Users, FileText, DollarSign, RefreshCw, Eye, EyeOff, Save, X, ExternalLink, Sliders, BarChart2, Calendar, TrendingUp, Printer, Ticket, Settings2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 interface AdminViewProps {
@@ -8,9 +8,10 @@ interface AdminViewProps {
   orders: Order[];
   onRefreshData: () => void;
   currentUser: { id: string; name: string } | null;
+  onNavigateTab?: (tab: string) => void;
 }
 
-export default function AdminView({ products, orders, onRefreshData, currentUser }: AdminViewProps) {
+export default function AdminView({ products, orders, onRefreshData, currentUser, onNavigateTab }: AdminViewProps) {
   const [activeTab, setActiveTab] = useState<"orders" | "products" | "customers" | "files" | "sales" | "coupons">("orders");
   const [customers, setCustomers] = useState<CustomerSummary[]>([]);
   const [loadingCustomers, setLoadingCustomers] = useState(false);
@@ -72,6 +73,14 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
   const [cancelReasonInput, setCancelReasonInput] = useState("");
   const [submittingCancellation, setSubmittingCancellation] = useState(false);
 
+  // Create Order for Customer states
+  const [selectedCustomerForOrder, setSelectedCustomerForOrder] = useState<CustomerSummary | null>(null);
+  const [adminOrderItems, setAdminOrderItems] = useState<{ productId: string; quantity: number }[]>([]);
+  const [adminCouponCode, setAdminCouponCode] = useState("");
+  const [adminOrderError, setAdminOrderError] = useState<string | null>(null);
+  const [submittingAdminOrder, setSubmittingAdminOrder] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
+
   // Validation and status filtering states
   const [validationError, setValidationError] = useState<string | null>(null);
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<"all" | "pending" | "shipped" | "delivered" | "cancelled">("all");
@@ -96,6 +105,38 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
   const [cpIsActive, setCpIsActive] = useState(true);
   const [submittingCoupon, setSubmittingCoupon] = useState(false);
   const [couponFormError, setCouponFormError] = useState<string | null>(null);
+
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleResetOrders = async () => {
+    const confirmMessage = "คุณแน่ใจหรือไม่ที่จะรีเซ็ตคำสั่งซื้อและออเดอร์ทั้งหมดให้เป็น 0?\nการดำเนินการนี้จะลบออเดอร์และรูปภาพสลิปทั้งหมดในฐานข้อมูล (รวมถึง Firestore) และไม่สามารถกู้คืนได้";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    setIsResetting(true);
+    try {
+      const response = await fetch("/api/orders/reset", {
+        method: "POST",
+        headers: {
+          "x-user-id": currentUser?.id || "",
+        },
+      });
+
+      if (response.ok) {
+        alert("รีเซ็ตคำสั่งซื้อและออเดอร์ทั้งหมดเป็น 0 เรียบร้อยแล้ว!");
+        onRefreshData();
+      } else {
+        const errData = await response.json();
+        alert(`เกิดข้อผิดพลาด: ${errData.error || "ไม่สามารถรีเซ็ตออเดอร์ได้"}`);
+      }
+    } catch (error) {
+      console.error("Error resetting orders:", error);
+      alert("เกิดข้อผิดพลาดในการเชื่อมต่อกับเซิร์ฟเวอร์");
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const fetchCoupons = async () => {
     setLoadingCoupons(true);
@@ -449,6 +490,121 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
     }
   };
 
+  // Create Order for Customer Handlers
+  const handleOpenCreateOrder = (cust: CustomerSummary) => {
+    setSelectedCustomerForOrder(cust);
+    setAdminOrderItems([]);
+    setAdminCouponCode("");
+    setProductSearch("");
+    setAdminOrderError(null);
+    fetchCoupons();
+  };
+
+  const handleAdminUpdateQuantity = (productId: string, delta: number) => {
+    setAdminOrderItems((prev) => {
+      const existing = prev.find((i) => i.productId === productId);
+      if (!existing) {
+         if (delta > 0) {
+           return [...prev, { productId, quantity: 1 }];
+         }
+         return prev;
+      }
+      const newQty = existing.quantity + delta;
+      if (newQty <= 0) {
+        return prev.filter((i) => i.productId !== productId);
+      }
+      return prev.map((i) =>
+        i.productId === productId ? { ...i, quantity: newQty } : i
+      );
+    });
+  };
+
+  const handleCreateOrderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCustomerForOrder) return;
+    if (adminOrderItems.length === 0) {
+      setAdminOrderError("กรุณาเลือกอย่างน้อย 1 รายการสินค้า");
+      return;
+    }
+
+    setSubmittingAdminOrder(true);
+    setAdminOrderError(null);
+
+    try {
+      const itemsPayload = adminOrderItems.map((item) => {
+        const prod = products.find((p) => p.id === item.productId);
+        return {
+          productId: item.productId,
+          name: prod?.name || "สินค้า",
+          price: prod?.price || 0,
+          quantity: item.quantity,
+        };
+      });
+
+      const subtotal = itemsPayload.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+      let discount = 0;
+      let appliedCouponCode = "";
+      if (adminCouponCode.trim()) {
+        const codeUpper = adminCouponCode.trim().toUpperCase();
+        const cp = coupons.find((c) => c.code === codeUpper && c.isActive);
+        if (cp) {
+          appliedCouponCode = cp.code;
+          if (cp.discountType === "percent") {
+            discount = Math.floor((subtotal * cp.discountValue) / 100);
+            if (cp.maxDiscount) {
+              discount = Math.min(discount, cp.maxDiscount);
+            }
+          } else {
+            discount = cp.discountValue;
+          }
+          discount = Math.min(discount, subtotal);
+        }
+      }
+
+      const totalAmount = Math.max(0, subtotal - discount);
+
+      const payload = {
+        customerId: selectedCustomerForOrder.id,
+        customerName: selectedCustomerForOrder.name || "ลูกค้าสมาชิก",
+        customerPhone: "-",
+        customerAddress: "กรุณากรอกรายละเอียดที่อยู่จัดส่งและชำระเงิน",
+        items: itemsPayload,
+        totalAmount,
+        couponCode: appliedCouponCode || undefined,
+        discountAmount: appliedCouponCode ? discount : undefined,
+      };
+
+      const response = await fetch("/api/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": currentUser?.id || "",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminOrderError(data.error || "เกิดข้อผิดพลาดในการสร้างออเดอร์");
+      } else {
+        // Notify the user via LINE instantly if possible!
+        await fetch(`/api/orders/${data.order.id}/send-line`, { method: "POST" }).catch(() => {});
+
+        setSelectedCustomerForOrder(null);
+        setAdminOrderItems([]);
+        setAdminCouponCode("");
+        setProductSearch("");
+        onRefreshData();
+      }
+    } catch (err) {
+      console.error("Error creating customer order:", err);
+      setAdminOrderError("เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์");
+    } finally {
+      setSubmittingAdminOrder(false);
+    }
+  };
+
   // Print Shipping Label Handlers
   const handlePrintLabelClick = (order: Order) => {
     setPrintingOrder(order);
@@ -618,6 +774,26 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
 
         {/* Action summaries buttons */}
         <div className="flex gap-2">
+          {onNavigateTab && (
+            <>
+              <button
+                type="button"
+                onClick={() => onNavigateTab("shop-settings")}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-semibold text-slate-600 cursor-pointer transition-colors"
+              >
+                <Sliders size={13} />
+                <span>ตั้งค่าร้านค้า</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab("line-setup")}
+                className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100/50 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm"
+              >
+                <Settings2 size={13} />
+                <span>ตั้งค่าระบบ LINE API</span>
+              </button>
+            </>
+          )}
           <button
             onClick={onRefreshData}
             className="flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-semibold text-slate-600 cursor-pointer transition-colors"
@@ -711,6 +887,26 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
           <BarChart2 size={13} />
           รายงานยอดขายสินค้า
         </button>
+        {onNavigateTab && (
+          <>
+            <button
+              type="button"
+              onClick={() => onNavigateTab("shop-settings")}
+              className="px-5 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-800 transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5"
+            >
+              <Sliders size={13} />
+              ตั้งค่าร้านค้า
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab("line-setup")}
+              className="px-5 py-3 text-xs font-semibold border-b-2 border-transparent text-slate-500 hover:text-slate-800 transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 font-bold text-emerald-600"
+            >
+              <Settings2 size={13} className="text-emerald-500" />
+              ตั้งค่าระบบ LINE API
+            </button>
+          </>
+        )}
       </div>
 
       {/* TAB CONTENT */}
@@ -789,8 +985,21 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
                   </button>
                 </div>
               </div>
-              <div className="text-[10px] text-slate-400 font-bold self-end sm:self-auto">
-                แสดงผล: <span className="text-navy-primary">{filteredOrders.length}</span> ออเดอร์
+              <div className="flex items-center gap-3 self-end sm:self-auto">
+                <div className="text-[10px] text-slate-400 font-bold">
+                  แสดงผล: <span className="text-navy-primary">{filteredOrders.length}</span> ออเดอร์
+                </div>
+                {orders.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleResetOrders}
+                    disabled={isResetting}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {isResetting ? "กำลังรีเซ็ต..." : "รีเซ็ตออเดอร์ทั้งหมด"}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1137,7 +1346,19 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
                           </div>
                         </td>
                         <td className="p-4 font-semibold text-navy-primary">{cust.name}</td>
-                        <td className="p-4 text-slate-500 font-mono">{cust.email}</td>
+                        <td className="p-4 text-slate-500 font-mono">
+                          <div className="flex items-center gap-2.5">
+                            <span>{cust.email}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCreateOrder(cust)}
+                              className="w-5 h-5 rounded-full bg-red-50 hover:bg-red-100 text-red-600 hover:scale-110 active:scale-95 flex items-center justify-center cursor-pointer transition-all border border-red-200 font-extrabold flex-shrink-0"
+                              title="สร้างออเดอร์ใหม่ให้ลูกค้ารายนี้"
+                            >
+                              <Plus size={11} strokeWidth={4} />
+                            </button>
+                          </div>
+                        </td>
                         <td className="p-4 text-center font-semibold font-mono text-navy-primary">
                           {cust.ordersCount} ครั้ง
                         </td>
@@ -1755,6 +1976,300 @@ export default function AdminView({ products, orders, onRefreshData, currentUser
                 </button>
               </div>
             </form>
+          </motion.div>
+        </div>
+      )}
+
+      {/* MODAL: Create Order for Customer */}
+      {selectedCustomerForOrder && (
+        <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+          >
+            {/* Modal Header */}
+            <div className="bg-red-600 text-white p-4.5 flex justify-between items-center flex-shrink-0">
+              <h4 className="font-display font-black text-xs uppercase tracking-wider flex items-center gap-2">
+                <Plus size={14} strokeWidth={3.5} />
+                <span>สร้างออเดอร์ใหม่ให้ {selectedCustomerForOrder.name}</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setSelectedCustomerForOrder(null)}
+                className="text-white hover:text-red-200 cursor-pointer transition-colors border-0 bg-transparent animate-pulse"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="overflow-y-auto p-5 flex flex-col gap-5 text-xs flex-1">
+              {/* Customer Info Card */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-slate-200 border border-slate-350 overflow-hidden flex-shrink-0">
+                    {selectedCustomerForOrder.linePictureUrl ? (
+                      <img
+                        src={selectedCustomerForOrder.linePictureUrl}
+                        alt={selectedCustomerForOrder.name}
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center font-bold text-xs text-slate-500">
+                        LINE
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <h5 className="font-bold text-navy-primary text-sm">{selectedCustomerForOrder.name}</h5>
+                    <p className="text-slate-500 font-mono text-[10px]">{selectedCustomerForOrder.email}</p>
+                    {selectedCustomerForOrder.lineDisplayName && (
+                      <p className="text-emerald-600 font-medium text-[9px] mt-0.5">
+                        🟢 LINE Display: {selectedCustomerForOrder.lineDisplayName}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="text-left sm:text-right">
+                  <p className="text-[10px] text-slate-400 font-bold uppercase">ยอดรวมประวัติช้อป</p>
+                  <p className="font-display font-black text-brand-green text-sm">
+                    ฿{selectedCustomerForOrder.totalSpent.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              {/* Error Alert */}
+              {adminOrderError && (
+                <div className="bg-rose-50 border border-rose-150 text-rose-700 px-4 py-3 rounded-lg font-semibold flex items-center gap-2">
+                  <span>⚠️ {adminOrderError}</span>
+                </div>
+              )}
+
+              {/* Product Selection List */}
+              <div className="flex flex-col gap-2.5">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                    เลือกสินค้าเข้ารายการออเดอร์
+                  </label>
+                  <input
+                    type="text"
+                    value={productSearch}
+                    onChange={(e) => setProductSearch(e.target.value)}
+                    placeholder="🔍 ค้นหาสินค้าตามชื่อ..."
+                    className="bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500 focus:border-red-500 w-full sm:w-48 font-sans"
+                  />
+                </div>
+
+                <div className="border border-slate-200 rounded-xl max-h-[180px] overflow-y-auto divide-y divide-slate-100 bg-white shadow-inner">
+                  {products
+                    .filter((p) => p.name.toLowerCase().includes(productSearch.toLowerCase()))
+                    .map((prod) => {
+                      const selectedItem = adminOrderItems.find((i) => i.productId === prod.id);
+                      const qty = selectedItem ? selectedItem.quantity : 0;
+                      return (
+                        <div key={prod.id} className="p-3 flex items-center justify-between gap-3 hover:bg-slate-50/50 transition-colors">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-lg bg-slate-100 overflow-hidden border border-slate-200 flex-shrink-0">
+                              <img src={prod.imageUrl} alt={prod.name} className="w-full h-full object-cover" />
+                            </div>
+                            <div>
+                              <p className="font-semibold text-slate-800 leading-tight">{prod.name}</p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">
+                                <span className="font-bold text-red-650 text-xs">฿{prod.price.toLocaleString()}</span>
+                                <span className="mx-1.5">•</span>
+                                สต็อก: {prod.stock} ชิ้น
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {qty === 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => handleAdminUpdateQuantity(prod.id, 1)}
+                                className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-lg border border-red-200 transition-all cursor-pointer text-[10px] flex items-center gap-1"
+                              >
+                                <Plus size={10} strokeWidth={3.5} />
+                                <span>เพิ่มสินค้า</span>
+                              </button>
+                            ) : (
+                              <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-200">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminUpdateQuantity(prod.id, -1)}
+                                  className="w-6 h-6 rounded bg-white hover:bg-slate-50 text-slate-600 flex items-center justify-center cursor-pointer transition-all border border-slate-200/40 text-xs font-bold"
+                                >
+                                  -
+                                </button>
+                                <span className="px-3 text-slate-800 font-bold font-mono text-xs">{qty}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminUpdateQuantity(prod.id, 1)}
+                                  className="w-6 h-6 rounded bg-white hover:bg-slate-50 text-slate-600 flex items-center justify-center cursor-pointer transition-all border border-slate-200/40 text-xs font-bold"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* Selected Items & Total Summary Card */}
+              {adminOrderItems.length > 0 && (
+                <div className="bg-slate-50/50 rounded-xl p-4 border border-slate-200 space-y-3">
+                  <h6 className="font-bold text-slate-600 uppercase tracking-wide text-[10px]">
+                    รายการสินค้าที่เลือก ({adminOrderItems.reduce((sum, i) => sum + i.quantity, 0)} ชิ้น)
+                  </h6>
+                  <div className="space-y-1.5">
+                    {adminOrderItems.map((item) => {
+                      const prod = products.find((p) => p.id === item.productId);
+                      if (!prod) return null;
+                      return (
+                        <div key={item.productId} className="flex justify-between items-center text-[11px] text-slate-700">
+                          <span>
+                            • {prod.name} <span className="font-mono text-slate-400 font-bold">x{item.quantity}</span>
+                          </span>
+                          <span className="font-semibold text-slate-800">
+                            ฿{(prod.price * item.quantity).toLocaleString()}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Coupon Application input */}
+                  <div className="border-t border-slate-200 pt-3 flex flex-col gap-1.5">
+                    <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1.5">
+                      <span className="font-bold text-slate-500">รหัสคูปองส่วนลด (ถ้ามี):</span>
+                      <input
+                        type="text"
+                        value={adminCouponCode}
+                        onChange={(e) => setAdminCouponCode(e.target.value)}
+                        placeholder="กรอกโค้ด เช่น DISCOUNT10"
+                        className="bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-850 uppercase font-mono w-full sm:w-44 focus:outline-none focus:ring-1 focus:ring-red-500 focus:border-red-500"
+                      />
+                    </div>
+                    {/* List active coupons as helper tags */}
+                    {coupons.filter(c => c.isActive).length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-1 items-center">
+                        <span className="text-[10px] text-slate-400">คูปองร้านค้า:</span>
+                        {coupons.filter(c => c.isActive).map((cp) => (
+                          <button
+                            type="button"
+                            key={cp.id}
+                            onClick={() => setAdminCouponCode(cp.code)}
+                            className={`px-2 py-1 text-[9px] font-bold rounded border transition-all cursor-pointer ${
+                              adminCouponCode.toUpperCase() === cp.code.toUpperCase()
+                                ? "bg-red-500 text-white border-red-500"
+                                : "bg-white text-slate-600 border-slate-200 hover:border-slate-450"
+                            }`}
+                          >
+                            🏷️ {cp.code} ({cp.discountType === "percent" ? `-${cp.discountValue}%` : `-฿${cp.discountValue}`})
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Detailed Price calculations */}
+                  <div className="border-t border-slate-200 pt-3 space-y-1 text-slate-600">
+                    <div className="flex justify-between">
+                      <span>ยอดรวมสินค้าย่อย (Subtotal):</span>
+                      <span className="font-mono font-semibold">
+                        ฿{adminOrderItems
+                          .reduce((sum, item) => {
+                            const prod = products.find((p) => p.id === item.productId);
+                            return sum + (prod ? prod.price * item.quantity : 0);
+                          }, 0)
+                          .toLocaleString()}
+                      </span>
+                    </div>
+
+                    {/* Calculated Coupon Discount */}
+                    {(() => {
+                      const subtotal = adminOrderItems.reduce((sum, item) => {
+                        const prod = products.find((p) => p.id === item.productId);
+                        return sum + (prod ? prod.price * item.quantity : 0);
+                      }, 0);
+                      const cp = coupons.find(c => c.code === adminCouponCode.trim().toUpperCase() && c.isActive);
+                      if (cp) {
+                        let discount = 0;
+                        if (cp.discountType === "percent") {
+                          discount = Math.floor((subtotal * cp.discountValue) / 100);
+                          if (cp.maxDiscount) discount = Math.min(discount, cp.maxDiscount);
+                        } else {
+                          discount = cp.discountValue;
+                        }
+                        discount = Math.min(discount, subtotal);
+                        return (
+                          <div className="flex justify-between text-rose-600 font-semibold">
+                            <span>🏷️ ส่วนลดคูปอง ({cp.code}):</span>
+                            <span className="font-mono">-฿{discount.toLocaleString()}</span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+
+                    <div className="flex justify-between text-navy-primary font-bold text-sm border-t border-dashed border-slate-200 pt-2">
+                      <span>ยอดชำระเงินสุทธิ (Total Payment):</span>
+                      <span className="font-mono font-black text-red-600 text-base">
+                        ฿{(() => {
+                          const subtotal = adminOrderItems.reduce((sum, item) => {
+                            const prod = products.find((p) => p.id === item.productId);
+                            return sum + (prod ? prod.price * item.quantity : 0);
+                          }, 0);
+                          const cp = coupons.find(c => c.code === adminCouponCode.trim().toUpperCase() && c.isActive);
+                          let discount = 0;
+                          if (cp) {
+                            if (cp.discountType === "percent") {
+                              discount = Math.floor((subtotal * cp.discountValue) / 100);
+                              if (cp.maxDiscount) discount = Math.min(discount, cp.maxDiscount);
+                            } else {
+                              discount = cp.discountValue;
+                            }
+                            discount = Math.min(discount, subtotal);
+                          }
+                          return Math.max(0, subtotal - discount).toLocaleString();
+                        })()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="border-t border-slate-200 p-4.5 bg-slate-50 flex gap-3 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setSelectedCustomerForOrder(null)}
+                className="flex-1 bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 font-bold py-3 rounded-xl text-xs transition-all cursor-pointer text-center"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                disabled={submittingAdminOrder || adminOrderItems.length === 0}
+                onClick={handleCreateOrderSubmit}
+                className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold py-3 rounded-xl text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-md border-0"
+              >
+                {submittingAdminOrder ? (
+                  <RefreshCw className="animate-spin" size={13} />
+                ) : (
+                  <>
+                    <Plus size={13} strokeWidth={3} />
+                    <span>สร้างออเดอร์และแจ้งเตือน</span>
+                  </>
+                )}
+              </button>
+            </div>
           </motion.div>
         </div>
       )}

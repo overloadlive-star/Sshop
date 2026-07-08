@@ -430,31 +430,33 @@ export default function CartView({ products, cart, onUpdateQuantity, onClearCart
 
       // 2. Upload payment slip if provided
       if (slipBase64) {
-        const uploadRes = await fetch(`/api/orders/${newOrder.id}/upload-slip`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-User-Id": currentUser?.id || "",
-          },
-          body: JSON.stringify({ slipBase64 }),
-        });
-        
-        if (!uploadRes.ok) {
-          console.error("Warning: Slip upload failed but order is registered.");
+        try {
+          const uploadRes = await fetch(`/api/orders/${newOrder.id}/upload-slip`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-User-Id": currentUser?.id || "",
+            },
+            body: JSON.stringify({ slipBase64 }),
+          });
+          
+          if (!uploadRes.ok) {
+            console.error("Warning: Slip upload failed but order is registered.");
+          }
+        } catch (uploadErr) {
+          console.error("Warning: Slip upload network/request error:", uploadErr);
         }
       }
 
-      // 3. Dispatch LINE Notification API
-      const lineRes = await fetch(`/api/orders/${newOrder.id}/send-line`, {
+      // 3. Dispatch LINE Notification API (background, do not await to prevent blocking checkout)
+      fetch(`/api/orders/${newOrder.id}/send-line`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
+      }).catch((lineErr) => {
+        console.error("Warning: LINE notification trigger failed:", lineErr);
       });
-
-      if (!lineRes.ok) {
-        console.error("Warning: LINE notification API error.");
-      }
 
       // Save shipping details to localStorage for future use
       const key = "last_shipping_info_" + (currentUser?.id || "guest");
@@ -470,6 +472,9 @@ export default function CartView({ products, cart, onUpdateQuantity, onClearCart
           addrZipcode,
         })
       );
+
+      // Show success feedback
+      alert(lang === "th" ? "สั่งซื้อสินค้าและส่งสลิปชำระเงินเรียบร้อยแล้ว! ระบบกำลังนำคุณไปที่หน้าประวัติการสั่งซื้อ" : "Order placed and payment slip uploaded successfully! Redirecting you to order history...");
 
       // Clear the local cart items and move to success screen
       onClearCart();

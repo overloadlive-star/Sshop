@@ -19,6 +19,28 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
   const [submittingSlip, setSubmittingSlip] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
+  // Shipping details input states for payment modal
+  const [custNameInput, setCustNameInput] = useState("");
+  const [custPhoneInput, setCustPhoneInput] = useState("");
+  const [custAddressInput, setCustAddressInput] = useState("");
+
+  React.useEffect(() => {
+    if (payingOrder) {
+      setCustNameInput(payingOrder.customerName !== "ลูกค้าสมาชิก" ? payingOrder.customerName : "");
+      setCustPhoneInput(payingOrder.customerPhone !== "-" ? payingOrder.customerPhone : "");
+      setCustAddressInput(
+        payingOrder.customerAddress !== "กรุณากรอกรายละเอียดที่อยู่จัดส่งและชำระเงิน" &&
+        payingOrder.customerAddress !== "รอผู้ใช้ระบุรายละเอียดจัดส่งและแนบสลิปชำระเงิน"
+          ? payingOrder.customerAddress
+          : ""
+      );
+    } else {
+      setCustNameInput("");
+      setCustPhoneInput("");
+      setCustAddressInput("");
+    }
+  }, [payingOrder]);
+
   // Status helper for colors
   const getPaymentStatusBadge = (status: string) => {
     switch (status) {
@@ -74,6 +96,11 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
     e.preventDefault();
     if (!payingOrder || !slipBase64) return;
 
+    if (!custNameInput.trim() || !custPhoneInput.trim() || !custAddressInput.trim()) {
+      alert(lang === "th" ? "กรุณากรอกข้อมูลที่อยู่จัดส่งให้ครบถ้วน!" : "Please fill in all shipping details!");
+      return;
+    }
+
     setSubmittingSlip(true);
     try {
       const response = await fetch(`/api/orders/${payingOrder.id}/upload-slip`, {
@@ -82,20 +109,80 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
           "Content-Type": "application/json",
           "X-User-Id": currentUser?.id || "",
         },
-        body: JSON.stringify({ slipBase64 }),
+        body: JSON.stringify({
+          slipBase64,
+          customerName: custNameInput,
+          customerPhone: custPhoneInput,
+          customerAddress: custAddressInput
+        }),
       });
 
       if (response.ok) {
-        // Also fire LINE update
-        await fetch(`/api/orders/${payingOrder.id}/send-line`, { method: "POST" });
+        alert(lang === "th" ? "อัปโหลดสลิปชำระเงินเรียบร้อยแล้ว! ออเดอร์ของคุณอยู่ระหว่างรอการตรวจสอบ" : "Payment slip uploaded successfully! Your order is being verified.");
+        // Also fire LINE update in the background (do not await to prevent blocking the UI/popup from closing)
+        fetch(`/api/orders/${payingOrder.id}/send-line`, { method: "POST" }).catch((lineErr) => {
+          console.error("Error sending LINE notification after uploading slip:", lineErr);
+        });
         onRefreshData();
         setPayingOrder(null);
         setSlipBase64(null);
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        alert(lang === "th" 
+          ? `เกิดข้อผิดพลาด: ${errorData.error || "ไม่สามารถอัปโหลดสลิปได้"}` 
+          : `Error: ${errorData.error || "Failed to upload slip"}`
+        );
       }
     } catch (err) {
       console.error("Error uploading slip:", err);
+      alert(lang === "th" 
+        ? "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง" 
+        : "Connection error, please try again"
+      );
     } finally {
       setSubmittingSlip(false);
+    }
+  };
+
+  const [cancellingOrder, setCancellingOrder] = useState<string | null>(null);
+
+  const handleCancelOrder = async (orderId: string) => {
+    const confirmMsg = lang === "th"
+      ? "คุณแน่ใจหรือไม่ว่าต้องการยกเลิกคำสั่งซื้อนี้?\nเมื่อยกเลิกแล้วระบบจะส่งข้อความแจ้งร้านค้าและไม่สามารถแก้ไขสถานะออเดอร์นี้ได้อีก"
+      : "Are you sure you want to cancel this order?\nOnce cancelled, the shop will be notified and this status cannot be reverted.";
+      
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    setCancellingOrder(orderId);
+    try {
+      const response = await fetch(`/api/orders/${orderId}/cancel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": currentUser?.id || "",
+        },
+        body: JSON.stringify({
+          reason: lang === "th" ? "ยกเลิกคำสั่งซื้อโดยผู้ซื้อ" : "Cancelled by buyer"
+        })
+      });
+
+      if (response.ok) {
+        alert(lang === "th" ? "ยกเลิกคำสั่งซื้อเรียบร้อยแล้ว!" : "Order cancelled successfully!");
+        onRefreshData();
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        alert(lang === "th"
+          ? `เกิดข้อผิดพลาด: ${errorData.error || "ไม่สามารถยกเลิกคำสั่งซื้อได้"}`
+          : `Error: ${errorData.error || "Failed to cancel order"}`
+        );
+      }
+    } catch (err) {
+      console.error("Error cancelling order:", err);
+      alert(lang === "th" ? "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง" : "Connection error, please try again");
+    } finally {
+      setCancellingOrder(null);
     }
   };
 
@@ -209,16 +296,29 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
                   {getShippingStatusBadge(order.shippingStatus)}
                 </div>
 
-                {/* Upload slip secondary trigger if pending */}
-                {order.paymentStatus === "pending" && (
-                  <button
-                    onClick={() => setPayingOrder(order)}
-                    className="w-full md:w-auto bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-bold px-3.5 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm border-0"
-                  >
-                    <CreditCard size={11} className="text-brand-green" />
-                    <span>{lang === "th" ? "ชำระเงินและแนบสลิป" : "Pay & Attach Slip"}</span>
-                  </button>
-                )}
+                <div className="flex flex-col gap-2 w-full md:w-auto items-stretch md:items-end">
+                  {/* Upload slip secondary trigger if pending */}
+                  {order.paymentStatus === "pending" && (
+                    <button
+                      onClick={() => setPayingOrder(order)}
+                      className="w-full md:w-auto bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-bold px-3.5 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm border-0"
+                    >
+                      <CreditCard size={11} className="text-brand-green" />
+                      <span>{lang === "th" ? "ชำระเงินและแนบสลิป" : "Pay & Attach Slip"}</span>
+                    </button>
+                  )}
+
+                  {/* Cancel button if order is not shipped/delivered/cancelled */}
+                  {order.shippingStatus !== "shipped" && order.shippingStatus !== "delivered" && order.shippingStatus !== "cancelled" && (
+                    <button
+                      onClick={() => handleCancelOrder(order.id)}
+                      disabled={cancellingOrder === order.id}
+                      className="w-full md:w-auto bg-rose-50 hover:bg-rose-100 text-rose-600 text-[10px] font-bold px-3.5 py-2 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm border border-rose-200/40 disabled:opacity-50"
+                    >
+                      <span>❌ {lang === "th" ? "ยกเลิกคำสั่งซื้อ" : "Cancel Order"}</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -231,7 +331,7 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="bg-white rounded-2xl max-w-sm w-full shadow-lg border border-slate-100 overflow-hidden"
+            className="bg-white rounded-2xl max-w-md w-full shadow-lg border border-slate-100 overflow-hidden"
           >
             <div className="bg-[#EBF3F8] text-slate-800 border-b border-[#DAE5EF] p-4 flex justify-between items-center">
               <h4 className="font-sans font-bold text-xs uppercase tracking-wider text-[#2F526B] flex items-center gap-1.5">
@@ -246,7 +346,7 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
               </button>
             </div>
 
-            <form onSubmit={handleUploadSlipSubmit} className="p-5 flex flex-col gap-4 text-xs">
+            <form onSubmit={handleUploadSlipSubmit} className="p-5 flex flex-col gap-4 text-xs max-h-[85vh] overflow-y-auto">
               <div className="flex flex-col items-center gap-2">
                 {/* Fake PromptPay design inside modal */}
                 <div className="bg-[#EBF3F8] text-[#2F526B] p-4 rounded-2xl border border-[#DAE5EF] flex flex-col items-center gap-2 w-40 text-center shadow-sm">
@@ -263,9 +363,58 @@ export default function OrdersHistoryView({ orders, products, onRefreshData, cur
                 </div>
                 <p className="text-[9px] text-slate-400 text-center font-sans mt-1">
                   {lang === "th"
-                    ? "สแกนชำระเงินและอัปโหลดรูปภาพสลิปที่โอนด้านล่างนี้"
-                    : "Scan QR to make PromptPay payment, then upload your transfer slip below."}
+                    ? "สแกนชำระเงินและกรอกข้อมูลที่อยู่จัดส่งพร้อมอัปโหลดรูปภาพสลิปที่โอนด้านล่างนี้"
+                    : "Scan QR to make PromptPay payment, then fill shipping details and upload transfer slip."}
                 </p>
+              </div>
+
+              {/* Shipping Information Fields */}
+              <div className="flex flex-col gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-150">
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
+                  📍 {lang === "th" ? "ข้อมูลจัดส่งและใบเสร็จ" : "Shipping & Receipt Info"}
+                </p>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">
+                    {lang === "th" ? "ชื่อผู้รับสินค้า" : "Recipient Name"} *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={custNameInput}
+                    onChange={(e) => setCustNameInput(e.target.value)}
+                    placeholder={lang === "th" ? "เช่น สมชาย รักดี" : "e.g. John Doe"}
+                    className="bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:border-slate-400 font-sans font-semibold"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">
+                    {lang === "th" ? "เบอร์โทรศัพท์ติดต่อ" : "Contact Phone"} *
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={custPhoneInput}
+                    onChange={(e) => setCustPhoneInput(e.target.value)}
+                    placeholder={lang === "th" ? "เช่น 0812345678" : "e.g. 0812345678"}
+                    className="bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:border-slate-400 font-mono font-semibold"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">
+                    {lang === "th" ? "ที่อยู่จัดส่งสินค้าโดยละเอียด" : "Detailed Shipping Address"} *
+                  </label>
+                  <textarea
+                    required
+                    rows={3}
+                    value={custAddressInput}
+                    onChange={(e) => setCustAddressInput(e.target.value)}
+                    placeholder={lang === "th" ? "ระบุ บ้านเลขที่, ถนน, ตำบล, อำเภอ, จังหวัด, รหัสไปรษณีย์" : "Specify House No, Street, Sub-district, District, Province, Postal Code"}
+                    className="bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:border-slate-400 font-sans font-semibold resize-none"
+                  />
+                </div>
               </div>
 
               {/* Upload Drag area */}

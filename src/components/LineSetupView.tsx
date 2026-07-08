@@ -14,6 +14,7 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
     lineNotifyToken: "",
     lineChannelAccessToken: "",
     lineChannelSecret: "",
+    lineLiffId: "",
     enabled: true,
     storeName: "S Shop Online",
   });
@@ -58,7 +59,7 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setAppUrl(window.location.origin);
+      setAppUrl(window.location.origin + "/app");
     }
   }, []);
 
@@ -360,6 +361,27 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
                     placeholder="วาง Channel Secret ของ LINE OA ที่นี่..."
                     className="bg-slate-50 hover:bg-slate-100/50 focus:bg-white border border-slate-200/60 focus:border-emerald-500 rounded-xl px-4 py-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/10 transition-all shadow-inner"
                   />
+                </div>
+
+                {/* LINE Login LIFF ID */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex justify-between items-center">
+                    <label className="font-bold text-slate-600 uppercase tracking-wide flex items-center gap-1.5">
+                      <Smartphone size={13} className="text-emerald-500" /> 
+                      <span>LINE Login LIFF ID (ระบบล็อกอินด้วย LINE ของจริง)</span>
+                    </label>
+                    <span className="text-[10px] font-semibold text-slate-400">LIFF Integration</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={config.lineLiffId || ""}
+                    onChange={(e) => setConfig({ ...config, lineLiffId: e.target.value })}
+                    placeholder="เช่น 2004567890-AbCdEfGh..."
+                    className="bg-slate-50 hover:bg-slate-100/50 focus:bg-white border border-slate-200/60 focus:border-emerald-500 rounded-xl px-4 py-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/10 transition-all shadow-inner"
+                  />
+                  <p className="text-[10px] text-slate-400 leading-normal -mt-1">
+                    ใส่ LIFF ID จาก LINE Developers Console (แท็บ LIFF ของ LINE Login Channel) เพื่อเปิดใช้งานการล็อกอินและเชื่อมต่อกับ LINE จริงอย่างสมบูรณ์แบบ
+                  </p>
                 </div>
 
                 {/* Webhook URL indicator (CRITICAL FOR LIVE OA TESTING) */}
@@ -835,6 +857,23 @@ export default function LineSetupView({ currentUser }: LineSetupViewProps) {
                   <p className="font-bold text-slate-800 text-rose-600">วิธีหารหัส LINE User ID ของคุณ</p>
                   <p className="text-[11px] text-slate-500 mt-1 font-sans">
                     ในแท็บ <i>Basic settings</i> ของ LINE Developers เลื่อนมาด้านล่างสุด คุณจะพบหัวข้อ <b>Your user ID</b> (รหัสจะขึ้นต้นด้วยตัว U ตามด้วยตัวอักษร 32 ตัว) คัดลอกรหัสนี้มาใส่ช่อง <i>Admin LINE User ID</i> ซ้ายมือ บอทจึงจะส่งรายงานไปหาถูกคน!
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 5 */}
+              <div className="flex gap-4.5">
+                <div className="w-6 h-6 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center font-bold text-xs text-emerald-600 flex-shrink-0 shadow-sm font-mono">
+                  5
+                </div>
+                <div className="leading-relaxed flex-1">
+                  <p className="font-bold text-slate-800">วิธีสร้าง LINE Login LIFF ID</p>
+                  <p className="text-[11px] text-slate-500 mt-1 font-sans">
+                    • <b>สร้าง LINE Login Channel:</b> ใน LINE Developers Console กดสร้าง Channel ใหม่ประเภท <b>LINE Login</b>
+                    <br />• <b>ไปที่แท็บ LIFF:</b> กดคลิกแท็บ <i>LIFF</i> แล้วกดปุ่ม <b>Add</b> เพื่อสร้าง LIFF app ใหม่
+                    <br />• <b>ตั้งค่าข้อมูลแอป:</b> ใส่ชื่อแอป เลือกขนาดเป็น <i>Full</i>, เปิดสิทธิ์ <i>profile</i> และ <i>openid</i>
+                    <br />• <b>ระบุ Endpoint URL:</b> นำ URL เว็บไซต์ของคุณระบุลงในช่อง <i>Endpoint URL</i> (เช่น <span className="font-mono bg-slate-100 p-0.5 rounded text-[10px]">{appUrl}</span>) จากนั้นกดบันทึก
+                    <br />• <b>คัดลอก LIFF ID:</b> นำรหัส <b>LIFF ID</b> ที่ได้ มากรอกลงในช่อง <i>LINE Login LIFF ID</i> ซ้ายมือเพื่อเชื่อมระบบล็อกอินของจริง!
                   </p>
                 </div>
               </div>
